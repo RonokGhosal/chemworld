@@ -1,0 +1,19 @@
+# virtualenv / caches (2.8 GB+ — never commit)
+.venv/
+venv/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+cache/
+.tmp/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS / editor cruft
+.DS_Store
+.claude/
+
+# local scratch
+*.log
+/tmp/

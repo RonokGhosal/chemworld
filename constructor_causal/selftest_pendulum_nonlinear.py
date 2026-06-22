@@ -74,20 +74,23 @@ def main():
     ROT = {(COS, SIN), (SIN, COS), (OMEGA, COS), (OMEGA, SIN)}
     WEAK = {(TORQUE, COS), (TORQUE, SIN)}
     for s in SEEDS:
-        agL, w = _agent(s, ())                  # linear basis
+        agL, w = _agent(s, ())                  # linear basis: no product vocabulary
         true = w.true_edges()
+        # the DEFAULT recovered_edges() is now the grouped test -- both calls below use it,
+        # so the only thing that changes between BEFORE and AFTER is the agent's BASIS.
         p, r = _pr(agL.model.recovered_edges(), true); lin_p.append(p); lin_r.append(r)
-        agG, _ = _agent(s, PAIRS)               # product basis
-        Eg = agG.model.recovered_edges_grouped(eps=0.02)
+        agG, _ = _agent(s, PAIRS)               # product basis: sinθ*ω, cosθ*ω, ... available
+        Eg = agG.model.recovered_edges()        # DEFAULT path -- grouped wiring proven here
         p, r = _pr(Eg, true); grp_p.append(p); grp_r.append(r)
         rot_hits.append(len(Eg & ROT))
         if s == 0:
             seed0 = (agL, agG, Eg)
 
-    print(f"\n  BEFORE (linear basis, plain edge test): "
+    print(f"\n  (the grouped block test is now the DEFAULT recovered_edges; only the BASIS differs)")
+    print(f"  BEFORE (linear basis -- no product features): "
           f"precision={np.mean(lin_p):.2f}  recall={np.mean(lin_r):.2f}  "
           f"({int(round(np.mean(lin_r)*8))}/8 edges)")
-    print(f"  AFTER  (product basis, GROUP block test): "
+    print(f"  AFTER  (product basis -- same default test): "
           f"precision={np.mean(grp_p):.2f}  recall={np.mean(grp_r):.2f}  "
           f"({int(round(np.mean(grp_r)*8))}/8 edges)")
     agL, agG, Eg = seed0

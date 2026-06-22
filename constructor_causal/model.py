@@ -376,32 +376,63 @@ class BayesianDynamicsModel:
 
     # ---- the recovered causal graph ----------------------------------------
     def recovered_edges(self, z: float = 3.0, eps: float = 0.05,
-                        correct_multiplicity: bool = False) -> set:
-        """Confident *linear* cross-edges j->i (j observed, j != i).
+                        correct_multiplicity: bool = False, grouped: bool = True) -> set:
+        """Confident cross-edges j->i (j observed, j != i): variables whose value
+        CAUSALLY influences i's next value, through ANY channel (linear or nonlinear).
 
-        The test is a STUDENT-t test: the standardized weight m[k]/sqrt(Cov[k,k]) is
-        compared to a t-critical value with nu = 2 a_N degrees of freedom (matching
-        the Gaussian level of ``z``), because the conjugate posterior is multivariate
-        Student-t. This is the calibration fix: a fixed Gaussian z is over-confident
-        at the small n where structure is first recovered. As n grows the t-critical
-        converges to z, so large-sample behaviour is unchanged.
+        The test runs on the whole BLOCK of features source j generates -- its linear
+        term, every product it participates in, and its RFF block (``_source_block``) --
+        so a state-dependent (multiplicative / rotational) effect whose LINEAR coefficient
+        averages to ~0 but whose PRODUCT coefficient is strong is still recovered (e.g. a
+        pendulum's sin(theta)->cos(theta_next), carried by sin*omega). See
+        ``recovered_edges_grouped`` for the full rationale. The dispatch keeps backward
+        compatibility EXACT:
 
-        With ``correct_multiplicity=True`` the nominal level is additionally raised by
-        a Bonferroni-style family correction z_eff = sqrt(z^2 + 2 ln m) over the m
-        candidate edges (controls the family-wise false-edge rate; off by default
-        because it costs recall on deliberately weak edges)."""
+          * block size 1 (pure-linear basis -- no products/RFF for j): the legacy
+            STUDENT-t test on the single coefficient, |m[k]|/sqrt(Cov[k,k]) vs a t-critical
+            value at nu = 2 a_N, AND |m[k]| > eps. Bit-identical to the historical
+            behaviour, so every linear-world result is unchanged.
+          * block size >1: the JOINT Mahalanobis test T = m_B^T Cov_BB^{-1} m_B vs a
+            chi^2_k critical value (Wilson-Hilferty, finite-nu inflated by nu/(nu-2)),
+            gated by an effect-size floor sqrt(m_B^T S_BB m_B / n) > eps.
+
+        ``grouped=False`` forces the legacy linear-only test on every source (ignores any
+        product/RFF features), for a caller that wants strictly-linear edges.
+        ``correct_multiplicity=True`` raises the level by sqrt(z^2 + 2 ln m) over the m
+        candidate edges (family-wise false-edge control; off by default)."""
         candidates = [(i, j) for i in self.sensors for j in self.cols if j != i]
-        m = max(len(candidates), 1)
-        z_nom = float(np.sqrt(z * z + 2.0 * np.log(m))) if correct_multiplicity else z
+        mfam = max(len(candidates), 1)
+        z_nom = float(np.sqrt(z * z + 2.0 * np.log(mfam))) if correct_multiplicity else z
         Pinv = self._ensure_pinv()
+        n_eff = max(float(self.n), 1.0)
         E = set()
-        for (i, j) in candidates:
+        for i in self.sensors:
             mean, s2 = self._post_light(i)
-            k = self._lin_k(j)
-            std = float(np.sqrt(max(s2 * Pinv[k, k], EPS)))    # Cov[k,k] = s2 * Pinv[k,k]
-            crit = _t_crit(z_nom, self._dof[i])
-            if abs(mean[k]) > eps and abs(mean[k]) / std > crit:
-                E.add((j, i))
+            nu = float(self._dof[i])
+            crit_t = _t_crit(z_nom, nu)
+            infl = nu / (nu - 2.0) if nu > 2.0 else 1e9
+            for j in self.cols:
+                if j == i:
+                    continue
+                B = self._source_block(j) if grouped else [self._lin_k(j)]
+                if not B:
+                    continue
+                if len(B) == 1:                              # legacy single-coefficient t-test
+                    k = B[0]
+                    std = float(np.sqrt(max(s2 * Pinv[k, k], EPS)))
+                    if abs(mean[k]) > eps and abs(mean[k]) / std > crit_t:
+                        E.add((j, i))
+                else:                                        # joint block (Mahalanobis) test
+                    mB = mean[B]
+                    CovBB = s2 * Pinv[np.ix_(B, B)]
+                    try:
+                        T = float(mB @ np.linalg.solve(CovBB, mB))
+                    except np.linalg.LinAlgError:
+                        continue
+                    SBB = self.S[np.ix_(B, B)]
+                    sigB = float(np.sqrt(max(float(mB @ SBB @ mB) / n_eff, 0.0)))
+                    if T > _chi2_crit(z_nom, len(B)) * infl and sigB > eps:
+                        E.add((j, i))
         return E
 
     def recovered_interactions(self, z: float = 3.0, eps: float = 0.05) -> set:
@@ -439,52 +470,16 @@ class BayesianDynamicsModel:
 
     def recovered_edges_grouped(self, z: float = 3.0, eps: float = 0.05,
                                 correct_multiplicity: bool = False) -> set:
-        """The NONLINEAR-aware causal test. An edge j->i exists iff the WHOLE BLOCK of
-        features derived from j (linear + every product with j + j's RFF block) JOINTLY
-        explains i's next value -- not merely iff j's single linear coefficient is non-zero.
-
-        This is the fix for state-dependent (multiplicative / rotational) effects, where a
-        variable's influence flips sign with the state so its LINEAR coefficient averages to
-        ~0 while its product features carry a strong, consistent signal (e.g. on a pendulum,
-        sin(theta)->cos(theta_next) is carried entirely by the sin*omega product). The plain
-        recovered_edges() reads only the linear coefficient and so misses these.
-
-        Test: the block coefficients have a multivariate Student-t posterior (mean m_B, scale
-        Cov_BB = sigma^2 * Lambda_N^{-1}[B,B], dof nu = 2 a_N). The Mahalanobis statistic
-        T = m_B^T Cov_BB^{-1} m_B is ~ chi2_k under the null (block = 0), with a finite-nu
-        inflation nu/(nu-2); compare to the Wilson-Hilferty chi2_k critical value at level z.
-        An EFFECT-SIZE floor (RMS of the block's predictive contribution, computed from the
-        stored Gram: sqrt(m_B^T S_BB m_B / n) > eps) rejects blocks that are statistically
-        significant but negligible -- the group analogue of recovered_edges()'s eps guard.
-        For a pure-linear basis (block size 1) this reduces to recovered_edges()'s t-test."""
-        cands = [(i, j) for i in self.sensors for j in self.cols if j != i]
-        mfam = max(len(cands), 1)
-        zc = float(np.sqrt(z * z + 2.0 * np.log(mfam))) if correct_multiplicity else z
-        Pinv = self._ensure_pinv()
-        n_eff = max(float(self.n), 1.0)
-        E = set()
-        for i in self.sensors:
-            mean, s2 = self._post_light(i)
-            nu = float(self._dof[i])
-            infl = nu / (nu - 2.0) if nu > 2.0 else 1e9
-            for j in self.cols:
-                if j == i:
-                    continue
-                B = self._source_block(j)
-                if not B:
-                    continue
-                mB = mean[B]
-                CovBB = s2 * Pinv[np.ix_(B, B)]
-                try:
-                    T = float(mB @ np.linalg.solve(CovBB, mB))
-                except np.linalg.LinAlgError:
-                    continue
-                thr = _chi2_crit(zc, len(B)) * infl
-                SBB = self.S[np.ix_(B, B)]
-                sigB = float(np.sqrt(max(float(mB @ SBB @ mB) / n_eff, 0.0)))
-                if T > thr and sigB > eps:
-                    E.add((j, i))
-        return E
+        """Explicit nonlinear-aware (block) edge test. As of the default-wiring change this
+        is simply ``recovered_edges`` with grouping ON (now the default); kept as a named
+        entry point. An edge j->i exists iff the WHOLE BLOCK of features derived from j
+        (linear + every product with j + j's RFF block) JOINTLY explains i's next value --
+        not merely iff j's single linear coefficient is non-zero -- which is the fix for
+        state-dependent (multiplicative / rotational) effects whose linear coefficient
+        averages to ~0 (e.g. a pendulum's sin(theta)->cos(theta_next), carried by sin*omega).
+        For a pure-linear basis (block size 1) it reduces EXACTLY to the legacy t-test."""
+        return self.recovered_edges(z=z, eps=eps,
+                                    correct_multiplicity=correct_multiplicity, grouped=True)
 
     def recovered_parents(self, i: int, z: float = 3.0, eps: float = 0.05) -> list:
         return sorted(j for (j, t) in self.recovered_edges(z, eps) if t == i)

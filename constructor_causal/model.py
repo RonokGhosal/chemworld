@@ -77,6 +77,19 @@ def _t_crit(z: float, nu: float) -> float:
     return float(z + c1 / nu + c2 / nu ** 2 + c3 / nu ** 3 + c4 / nu ** 4)
 
 
+def _chi2_crit(z: float, k: int) -> float:
+    """Upper-tail chi-square_k critical value at the one-sided Gaussian level Phi(z), via
+    the Wilson-Hilferty cube-root approximation (numpy-only; no scipy). This is the
+    threshold for a JOINT test that a BLOCK of k coefficients is non-zero (Mahalanobis
+    statistic m^T Cov^{-1} m ~ chi2_k under the null). At k=1 it is exactly z^2 (the
+    squared z-test); for k>1 Wilson-Hilferty is accurate to <1% in the upper tail."""
+    k = max(int(k), 1)
+    if k == 1:
+        return z * z
+    t = 1.0 - 2.0 / (9.0 * k) + z * np.sqrt(2.0 / (9.0 * k))
+    return float(k * t ** 3) if t > 0 else 0.0
+
+
 class BayesianDynamicsModel:
     def __init__(self, d: int, actuators, alpha: float = 1e-2, sigma0: float = 1.0,
                  hidden=(), interaction_pairs=(), rff: int = 0, rff_scale: float = 1.0,
@@ -404,6 +417,73 @@ class BayesianDynamicsModel:
                 std = float(np.sqrt(max(s2 * Pinv[k, k], EPS)))
                 if abs(mean[k]) > eps and abs(mean[k]) / std > crit:
                     E.add(((a, b), i))
+        return E
+
+    def _source_block(self, j: int) -> list:
+        """Feature positions through which SOURCE variable j can influence a target: its
+        linear term, EVERY interaction it participates in (j*k for any k, incl. its
+        square j*j), and its random-Fourier block. A product j*k is shared by BOTH j's
+        and k's blocks -- correct, since a gate j*k is a real channel for each."""
+        idx = []
+        if j in self._col_pos:
+            idx.append(self._col_pos[j])                     # linear term
+        base_int = len(self.cols)
+        for t, (a, b) in enumerate(self.interaction_pairs):
+            if a == j or b == j:
+                idx.append(base_int + t)                     # any product involving j
+        if self.rff > 0 and j in self._col_pos:
+            base_rff = len(self.cols) + len(self.interaction_pairs)
+            start = base_rff + self._col_pos[j] * self.rff
+            idx.extend(range(start, start + self.rff))       # j's nonlinear basis block
+        return idx
+
+    def recovered_edges_grouped(self, z: float = 3.0, eps: float = 0.05,
+                                correct_multiplicity: bool = False) -> set:
+        """The NONLINEAR-aware causal test. An edge j->i exists iff the WHOLE BLOCK of
+        features derived from j (linear + every product with j + j's RFF block) JOINTLY
+        explains i's next value -- not merely iff j's single linear coefficient is non-zero.
+
+        This is the fix for state-dependent (multiplicative / rotational) effects, where a
+        variable's influence flips sign with the state so its LINEAR coefficient averages to
+        ~0 while its product features carry a strong, consistent signal (e.g. on a pendulum,
+        sin(theta)->cos(theta_next) is carried entirely by the sin*omega product). The plain
+        recovered_edges() reads only the linear coefficient and so misses these.
+
+        Test: the block coefficients have a multivariate Student-t posterior (mean m_B, scale
+        Cov_BB = sigma^2 * Lambda_N^{-1}[B,B], dof nu = 2 a_N). The Mahalanobis statistic
+        T = m_B^T Cov_BB^{-1} m_B is ~ chi2_k under the null (block = 0), with a finite-nu
+        inflation nu/(nu-2); compare to the Wilson-Hilferty chi2_k critical value at level z.
+        An EFFECT-SIZE floor (RMS of the block's predictive contribution, computed from the
+        stored Gram: sqrt(m_B^T S_BB m_B / n) > eps) rejects blocks that are statistically
+        significant but negligible -- the group analogue of recovered_edges()'s eps guard.
+        For a pure-linear basis (block size 1) this reduces to recovered_edges()'s t-test."""
+        cands = [(i, j) for i in self.sensors for j in self.cols if j != i]
+        mfam = max(len(cands), 1)
+        zc = float(np.sqrt(z * z + 2.0 * np.log(mfam))) if correct_multiplicity else z
+        Pinv = self._ensure_pinv()
+        n_eff = max(float(self.n), 1.0)
+        E = set()
+        for i in self.sensors:
+            mean, s2 = self._post_light(i)
+            nu = float(self._dof[i])
+            infl = nu / (nu - 2.0) if nu > 2.0 else 1e9
+            for j in self.cols:
+                if j == i:
+                    continue
+                B = self._source_block(j)
+                if not B:
+                    continue
+                mB = mean[B]
+                CovBB = s2 * Pinv[np.ix_(B, B)]
+                try:
+                    T = float(mB @ np.linalg.solve(CovBB, mB))
+                except np.linalg.LinAlgError:
+                    continue
+                thr = _chi2_crit(zc, len(B)) * infl
+                SBB = self.S[np.ix_(B, B)]
+                sigB = float(np.sqrt(max(float(mB @ SBB @ mB) / n_eff, 0.0)))
+                if T > thr and sigB > eps:
+                    E.add((j, i))
         return E
 
     def recovered_parents(self, i: int, z: float = 3.0, eps: float = 0.05) -> list:

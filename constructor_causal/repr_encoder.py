@@ -25,11 +25,18 @@ from .messy_world import MessyWorld, M1, M2, M3, N, NA
 
 
 def collect(world, n, rng):
-    O, A, Z = [], [], []
+    """ALIGNED transitions: each row is (obs_before, action, obs_after) -- the action that
+    actually CAUSED the obs_before -> obs_after transition. Zb/Za are the hidden latents
+    before/after (diagnosis only). Proven by selftest_repr_alignment."""
+    Ob, Ac, Oa, Zb, Za = [], [], [], [], []
+    ob, zb = world.observe(), world.z.copy()
     for _ in range(n):
         a = np.array([rng.choice([-2.0, 0.0, 2.0]) for _ in range(NA)], np.float32)
-        O.append(world.step(a)); A.append(a); Z.append(world.z.copy())
-    return (np.asarray(O, np.float32), np.asarray(A, np.float32), np.asarray(Z, np.float32))
+        oa = world.step(a)
+        Ob.append(ob); Ac.append(a); Oa.append(oa); Zb.append(zb); Za.append(world.z.copy())
+        ob, zb = oa, world.z.copy()
+    f = lambda x: np.asarray(x, np.float32)
+    return f(Ob), f(Ac), f(Oa), f(Zb), f(Za)
 
 
 def _mlp(sizes):
@@ -69,11 +76,11 @@ def _vicreg(z):
     return var, (off ** 2).sum() / z.shape[1]
 
 
-def train_encoder(O, A, dz=4, epochs=4000, lr=1e-3, inv_w=2.0, var_w=2.0, cov_w=1.0,
+def train_encoder(Ob, A, Oa, dz=4, epochs=4000, lr=1e-3, inv_w=2.0, var_w=2.0, cov_w=1.0,
                   hetero=True, predictive=True, inverse=True, seed=0):
     torch.manual_seed(seed)
-    Ot = torch.tensor(O[:-1]); On = torch.tensor(O[1:]); At = torch.tensor(A[:-1])
-    m = ReprModel(O.shape[1], dz)
+    Ot = torch.tensor(Ob); On = torch.tensor(Oa); At = torch.tensor(A)   # ALIGNED triples
+    m = ReprModel(Ob.shape[1], dz)
     opt = torch.optim.Adam(m.parameters(), lr=lr)
     for ep in range(epochs):
         z, zn = m.encode(Ot), m.encode(On)
@@ -115,8 +122,8 @@ def pca_encode(O, k):
 def main(seed=0, n=4000, dz=4):
     rng = np.random.default_rng(seed)
     w = MessyWorld(rng, obs_dim=14, nonlinear=True); w.reset()
-    O, A, Z = collect(w, n, rng)
-    tgt = {"m1": Z[:, M1], "m2": Z[:, M2], "m3": Z[:, M3], "noise_n": Z[:, N]}
+    Ob, A, Oa, Zb, Za = collect(w, n, rng)      # ALIGNED (obs_before, action, obs_after)
+    tgt = {"m1": Za[:, M1], "m2": Za[:, M2], "m3": Za[:, M3], "noise_n": Za[:, N]}
     print("=" * 74)
     print(f"LEARNED REPRESENTATION -- recover controllable latent (target R2>=0.80), drop noise")
     print("=" * 74)
@@ -128,15 +135,15 @@ def main(seed=0, n=4000, dz=4):
         print(f"  {name:>26}  {cl:>10.2f} / {cn:<11.2f}  {rl['noise_n']:>9.2f} / {rn['noise_n']:<9.2f}")
         return cn
 
-    show("PCA (variance)", pca_encode(O, dz))
+    show("PCA (variance)", pca_encode(Oa, dz))
     for name, kw in [("predictive-only(homo)", dict(hetero=False, inverse=False)),
                      ("predictive+inverse(homo)", dict(hetero=False, inverse=True)),
                      ("HETERO(beta) pred+inverse", dict(hetero=True, inverse=True))]:
-        m = train_encoder(O, A, dz=dz, epochs=7000, **kw, seed=seed)
+        m = train_encoder(Ob, A, Oa, dz=dz, epochs=7000, **kw, seed=seed)
         with torch.no_grad():
-            Zhat = m.encode(torch.tensor(O)).numpy()
+            Zhat = m.encode(torch.tensor(Oa)).numpy()
         show(name, Zhat)
-    show("oracle (true latent)", Z[:, [0, 1, 2, 3]])
+    show("oracle (true latent)", Za[:, [0, 1, 2, 3]])
     print("=" * 74)
 
 

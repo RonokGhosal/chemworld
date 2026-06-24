@@ -35,9 +35,11 @@ ACTUATORS = (A0, A1, AN, ADEC, AC, Z0, Z1)
 
 
 class CapabilityWorld:
-    def __init__(self, rng=None, noise_gain=4.0):
+    def __init__(self, rng=None, noise_gain=4.0, decoy_lever=True, confounder=True):
         self.rng = rng if rng is not None else np.random.default_rng(0)
         self.noise_gain = float(noise_gain)
+        self.decoy_lever = bool(decoy_lever)     # ablation: aDec -> decoy
+        self.confounder = bool(confounder)       # ablation: aC -> H -> c1,c2
         self.d = 16
         self.actuators = ACTUATORS
         self.hidden = (H,)
@@ -77,8 +79,8 @@ class CapabilityWorld:
         xn[M1] = 0.30 * xc[M1] + 0.60 * xc[GATE] * xc[A1]        # AND-gate
         xn[M2] = 0.60 * xc[M2] + 0.70 * xc[M1]                   # slow
         xn[M3] = 0.70 * xc[M3] + 0.60 * xc[M2]                   # deep
-        xn[DECOY] = 0.20 * xc[DECOY] + 0.70 * xc[M1] + 0.80 * xc[ADEC]
-        xn[H] = 0.30 * xc[H] + 0.80 * xc[AC]                     # hidden confounder
+        xn[DECOY] = 0.20 * xc[DECOY] + 0.70 * xc[M1] + (0.80 * xc[ADEC] if self.decoy_lever else 0.0)
+        xn[H] = 0.30 * xc[H] + (0.80 * xc[AC] if self.confounder else 0.0)   # hidden confounder
         xn[C1] = 0.20 * xc[C1] + 0.90 * xc[H]
         xn[C2] = 0.20 * xc[C2] + 0.90 * xc[H]
         xn[N] = 0.30 * xc[N]                                     # mean fixed; variance below
@@ -96,7 +98,8 @@ class CapabilityWorld:
 
     def clone(self, rng=None):
         return CapabilityWorld(rng if rng is not None else np.random.default_rng(),
-                               noise_gain=self.noise_gain)
+                               noise_gain=self.noise_gain, decoy_lever=self.decoy_lever,
+                               confounder=self.confounder)
 
 
 # ---- held-out goals -----------------------------------------------------------

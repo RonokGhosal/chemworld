@@ -4,7 +4,7 @@ stronger curiosity explorers and a model-free learner, on the held-out goals?
 
   ensemble / hetero-disagreement / learning-progress  -- reward-free explorers -> frozen
         WeightedHeteroModel -> shared MPC (same as causal/prediction).
-  model_free  -- NO pre-exploration model; random-shooting control directly on the goal world
+  random_shooting  -- NO pre-exploration model; random-shooting control directly on the goal world
         with only the post-goal budget (tests low-shot learning from scratch).
   oracle      -- true dynamics (upper bound).
 """
@@ -75,7 +75,7 @@ def explore_baseline(world, policy, budget, rng):
     return primary
 
 
-def model_free_control(world, goal, budget, rng, n_cand=5):
+def random_shooting_control(world, goal, budget, rng, n_cand=5):
     """No pre-built model: random-shooting constant actions on the real goal world."""
     target, (lo, hi), _ = goal["target"], goal["band"], None
     steps, best_a, best_v = 0, None, -1e9
@@ -100,8 +100,8 @@ def model_free_control(world, goal, budget, rng, n_cand=5):
 def run(agent, goal_name, seed, eb=300, gb=40):
     rng = np.random.default_rng(seed)
     gw = CapabilityWorld(np.random.default_rng(seed + 999)); gw.reset()
-    if agent == "model_free":
-        return model_free_control(gw, GOALS[goal_name], gb, rng)
+    if agent == "random_shooting":
+        return random_shooting_control(gw, GOALS[goal_name], gb, rng)
     ew = CapabilityWorld(np.random.default_rng(seed)); ew.reset()
     if agent == "oracle":
         model = ct.OracleModel(ew)
@@ -118,7 +118,7 @@ def main(goal="deep_chain", seeds=range(8)):
     print(f"SERIOUS BASELINES on CONTROL -- goal={goal}  ({len(list(seeds))} seeds)")
     print("=" * 72)
     agents = ["causal", "prediction", "disagreement", "hetero_disagreement",
-              "learning_progress", "model_free", "oracle"]
+              "learning_progress", "random_shooting", "oracle"]
     res = {a: [] for a in agents}
     for s in seeds:
         for a in agents:

@@ -14,6 +14,12 @@ Evaluation still measures true m3 (that is scoring, not supervision). We report 
 diagnostic readout vs prediction-first vs oracle, PER SEED, at the discriminating cells.
 
 Supervision ledger:  no-leak = K binary labels (counted).  diagnostic = 4000 continuous M3.
+
+HONESTY (commander's Order 3): this is SUPERVISED control with a small POST-GOAL label budget,
+NOT unsupervised goal discovery. The K binary labels are real supervision and are counted as
+such. In this simulator the label is generated from hidden M3 (m3>=tau) as a stand-in; in real
+use that bit must come from an actual observable task detector / human success signal, not from
+a hidden state. The result is "low-shot supervised control", not "label-free control".
 """
 from __future__ import annotations
 
@@ -41,17 +47,19 @@ def noleak_readout(zc_cal, labels):
     return np.append(clf.coef_[0], clf.intercept_[0])
 
 
-def main(seeds=range(5), n=4000):
+def main(seeds=range(5), n=4000, world_kw=None, label=""):
+    wk = world_kw or dict(obs_dim=14, nonlinear=True)
     print("=" * 90)
     print(f"NO-LEAK goal (K={K} binary calibration labels) vs diagnostic readout "
-          f"-- budget={BUDGET}, {len(list(seeds))} seeds")
+          f"-- budget={BUDGET}, {len(list(seeds))} seeds  {label}")
+    print(f"  world: {wk}")
     print("=" * 90)
     agents = ["causal_noleak", "causal_diag", "prediction_first", "oracle"]
     per = {bd: {a: [] for a in agents} for bd in BANDS}
 
     for s in seeds:
         rng = np.random.default_rng(s)
-        ew = MessyWorld(rng, obs_dim=14, nonlinear=True); ew.reset()
+        ew = MessyWorld(rng, **wk); ew.reset()
         Ob, A, Oa, Zb, Za = collect(ew, n, rng)
         sm = train_split(Ob, A, Oa, seed=s)
         pm = train_encoder(Ob, A, Oa, dz=6, hetero=False, inverse=False, seed=s)

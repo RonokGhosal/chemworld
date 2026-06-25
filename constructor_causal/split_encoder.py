@@ -39,24 +39,28 @@ CTRL = [A0, A1]            # control actions (inverse may use); aN is the noise 
 
 
 class SplitModel(nn.Module):
-    def __init__(self, obs_dim, dc=4, dn=2, n_act=3, h=128):
+    def __init__(self, obs_dim, dc=4, dn=2, n_act=3, h=128, bilinear=True, inv_all=False):
         super().__init__()
         self.dc, self.dn, self.nc = dc, dn, len(CTRL)
+        self.bilinear, self.inv_all = bilinear, inv_all
         self.enc = _mlp([obs_dim, h, h, dc + dn])
         self.A = nn.Linear(dc, dc, bias=False)               # z_c linear dynamics
         self.B = nn.Linear(self.nc, dc, bias=False)          # control action drive
-        self.Bil = nn.Linear(dc * self.nc, dc, bias=False)   # bilinear z_c (x) a_ctrl (the gate)
+        self.Bil = nn.Linear(dc * self.nc, dc, bias=False) if bilinear else None  # bilinear gate
         self.var = _mlp([dn + n_act, h, dc])                 # log-var per z_c dim (z_n + actions)
         self.dec = _mlp([dc + dn, h, h, obs_dim])            # reconstruct obs from [z_c, z_n]
-        self.inv = _mlp([2 * dc, h, self.nc])                # predict CONTROL actions from z_c
+        self.inv = _mlp([2 * dc, h, n_act if inv_all else self.nc])  # actions from z_c
 
     def encode(self, o):
         z = self.enc(o)
         return z[..., :self.dc], z[..., self.dc:]
 
     def forward_c(self, zc, a_ctrl):
-        bil = (zc.unsqueeze(-1) * a_ctrl.unsqueeze(-2)).flatten(-2)
-        return self.A(zc) + self.B(a_ctrl) + self.Bil(bil)
+        out = self.A(zc) + self.B(a_ctrl)
+        if self.bilinear:                                    # the structured AND-gate term
+            bil = (zc.unsqueeze(-1) * a_ctrl.unsqueeze(-2)).flatten(-2)
+            out = out + self.Bil(bil)
+        return out
 
 
 def _vic(z):
@@ -75,11 +79,20 @@ def _cross_cov(zc, zn):
 
 
 def train_split(Ob, A, Oa, dc=4, dn=2, epochs=8000, lr=1e-3, seed=0,
-                recon_w=1.0, inv_w=1.0, vic_w=2.0, cross_w=2.0):
+                recon_w=1.0, inv_w=1.0, vic_w=2.0, cross_w=2.0,
+                bilinear=True, inv_all=False, use_zn=True):
+    """Ablation flags (all default to the full model):
+       bilinear=False -> linear-only forward (drop the structured AND-gate term)
+       inv_all=True   -> inverse predicts ALL actions incl. the noise knob aN (not control-only)
+       use_zn=False   -> no noise latent (dn=0)
+       cross_w=0      -> no z_c/z_n decorrelation penalty"""
     torch.manual_seed(seed)
+    if not use_zn:
+        dn = 0
     Ot = torch.tensor(Ob); On = torch.tensor(Oa); At = torch.tensor(A)
     Act = At[:, CTRL]
-    m = SplitModel(Ob.shape[1], dc, dn)
+    inv_tgt = At if inv_all else Act
+    m = SplitModel(Ob.shape[1], dc, dn, bilinear=bilinear, inv_all=inv_all)
     opt = torch.optim.Adam(m.parameters(), lr=lr)
     for ep in range(epochs):
         zc, zn = m.encode(Ot); zcn, znn = m.encode(On)
@@ -88,10 +101,14 @@ def train_split(Ob, A, Oa, dc=4, dn=2, epochs=8000, lr=1e-3, seed=0,
         fwd = 0.5 * ((zcn - mu) ** 2 / torch.exp(logv) + logv)
         fwd = (torch.exp(logv).detach() ** 0.5 * fwd).mean()          # beta-NLL
         recon = ((m.dec(torch.cat([zc, zn], -1)) - Ot) ** 2).mean()   # z_n captures residual
-        inv = ((Act - m.inv(torch.cat([zc, zcn], -1))) ** 2).mean()   # control actions only
-        vc, cc = _vic(zc); vn, cn = _vic(zn)
+        inv = ((inv_tgt - m.inv(torch.cat([zc, zcn], -1))) ** 2).mean()
+        vc, cc = _vic(zc)
+        if dn > 0:
+            vn, cn = _vic(zn); cross = _cross_cov(zc, zn)
+        else:
+            vn = cn = cross = torch.zeros((), dtype=zc.dtype)
         loss = (fwd + recon_w * recon + inv_w * inv + vic_w * (vc + vn) + cc + cn
-                + cross_w * _cross_cov(zc, zn))
+                + cross_w * cross)
         opt.zero_grad(); loss.backward(); opt.step()
     return m
 

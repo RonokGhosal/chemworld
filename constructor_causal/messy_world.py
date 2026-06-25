@@ -29,18 +29,21 @@ NA = 3
 
 
 class MessyWorld:
-    def __init__(self, rng=None, obs_dim=14, obs_noise=0.05, noise_gain=4.0, nonlinear=True):
+    def __init__(self, rng=None, obs_dim=14, obs_noise=0.05, noise_gain=4.0, nonlinear=True,
+                 n_distract=0):
         self.rng = rng if rng is not None else np.random.default_rng(0)
         self.obs_dim = int(obs_dim)
         self.obs_noise = float(obs_noise)
         self.noise_gain = float(noise_gain)
         self.nonlinear = bool(nonlinear)
-        self.W = self.rng.normal(0.0, 0.8, (self.obs_dim, NZ))   # fixed unknown sensor map
+        self.n_distract = int(n_distract)                       # autonomous nuisance latents
+        self.nz = NZ + self.n_distract
+        self.W = self.rng.normal(0.0, 0.8, (self.obs_dim, self.nz))  # fixed unknown sensor map
         self.b = self.rng.uniform(0.0, 2 * np.pi, self.obs_dim)  # random phases (RFF)
-        self.z = np.zeros(NZ)
+        self.z = np.zeros(self.nz)
 
     def reset(self):
-        self.z = np.zeros(NZ)
+        self.z = np.zeros(self.nz)
         return self.observe()
 
     def observe(self):
@@ -61,6 +64,8 @@ class MessyWorld:
         zn[M3] = 0.70 * z[M3] + 0.60 * z[M2]
         zn[:4] += self.rng.normal(0.0, 0.02, 4)              # small latent process noise
         zn[N] = 0.30 * z[N] + self.rng.normal(0.0, 0.10 + self.noise_gain * max(aN, 0.0))
+        if self.n_distract:                                  # autonomous AR nuisance (uncontrolled)
+            zn[NZ:] = 0.85 * z[NZ:] + self.rng.normal(0.0, 0.4, self.n_distract)
         self.z = zn
         return self.observe()
 
@@ -70,7 +75,8 @@ class MessyWorld:
         different sensor coordinate system = an unintended domain shift)."""
         c = MessyWorld(rng if rng is not None else np.random.default_rng(),
                        obs_dim=self.obs_dim, obs_noise=self.obs_noise,
-                       noise_gain=self.noise_gain, nonlinear=self.nonlinear)
+                       noise_gain=self.noise_gain, nonlinear=self.nonlinear,
+                       n_distract=self.n_distract)
         c.W = self.W.copy(); c.b = self.b.copy(); c.reset()
         return c
 

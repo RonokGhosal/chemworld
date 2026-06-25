@@ -29,23 +29,34 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
            "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
     _os.environ.setdefault(_v, "1")
 
-from .world import DynamicalCausalWorld
-from .model import BayesianDynamicsModel, edge_scores
-from .constructor import (Box, Constructor, Library, compose, estimate_reliability,
-                          POSSIBLE_TAU, MIN_TRIALS)
-from .active_inference import (EpistemicExperimenter, CertifyingExperimenter,
-                               RandomExperimenter, NaiveSurpriseExperimenter,
-                               PassiveExperimenter)
-from .planner import ConstructorSynthesizer
-from .agent import ConstructorCausalAgent, discover_actuators
-from .certify import (AnytimeCS, BettingCS, DriftDetector, certify_reliability,
-                      certify_passive, calibrate_passive, certify_modelfree,
-                      certify_modelfree_continuous, certify_modelfree_reach,
-                      certify_library, detect_latent_lag)
-from .deploy import (RegimeSchedule, RoundMetrics, deploy, deploy_baseline,
-                     measure_localized_saving)
-from .prior import CausalPrior, world_to_B
-from .semantic_worlds import heater_world, tank_world
+# The full research stack is imported tolerantly: the lightweight, portable modules
+# (device, bigworld, transformer_opponent) must import with ONLY numpy+torch, so a
+# fresh GPU box without the research deps (causal_dag, scipy, sklearn, ...) can still
+# run `python -m constructor_causal.transformer_opponent`. When the heavy deps ARE
+# present (local dev), this block runs exactly as before.
+try:
+    from .world import DynamicalCausalWorld
+    from .model import BayesianDynamicsModel, edge_scores
+    from .constructor import (Box, Constructor, Library, compose, estimate_reliability,
+                              POSSIBLE_TAU, MIN_TRIALS)
+    from .active_inference import (EpistemicExperimenter, CertifyingExperimenter,
+                                   RandomExperimenter, NaiveSurpriseExperimenter,
+                                   PassiveExperimenter)
+    from .planner import ConstructorSynthesizer
+    from .agent import ConstructorCausalAgent, discover_actuators
+    from .causal_graph import CausalGraph, build_causal_graph
+    from .certify import (AnytimeCS, BettingCS, DriftDetector, certify_reliability,
+                          certify_passive, calibrate_passive, certify_modelfree,
+                          certify_modelfree_continuous, certify_modelfree_reach,
+                          certify_library, detect_latent_lag)
+    from .deploy import (RegimeSchedule, RoundMetrics, deploy, deploy_baseline,
+                         measure_localized_saving)
+    from .prior import CausalPrior, world_to_B
+    from .semantic_worlds import heater_world, tank_world
+except ImportError as _e:  # portable path: research deps absent (e.g. fresh GPU box)
+    import warnings as _w
+    _w.warn(f"constructor_causal: research stack not fully importable ({_e}); "
+            "lightweight modules (device, bigworld, transformer_opponent) still work.")
 
 __all__ = [
     "DynamicalCausalWorld", "BayesianDynamicsModel", "edge_scores",
@@ -54,7 +65,8 @@ __all__ = [
     "EpistemicExperimenter", "CertifyingExperimenter", "RandomExperimenter",
     "NaiveSurpriseExperimenter", "PassiveExperimenter",
     "ConstructorSynthesizer", "ConstructorCausalAgent",
-    "discover_actuators", "AnytimeCS", "BettingCS", "DriftDetector",
+    "discover_actuators", "CausalGraph", "build_causal_graph",
+    "AnytimeCS", "BettingCS", "DriftDetector",
     "certify_reliability", "certify_passive", "calibrate_passive",
     "certify_modelfree", "certify_modelfree_continuous", "certify_modelfree_reach",
     "certify_library", "detect_latent_lag",

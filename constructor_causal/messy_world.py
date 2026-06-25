@@ -64,6 +64,16 @@ class MessyWorld:
         self.z = zn
         return self.observe()
 
+    def clone(self, rng=None):
+        """A fresh EPISODE on the SAME embodied sensor map: identical W,b, new state + noise
+        stream. This is what train/test episodes must share (a NEW random world would be a
+        different sensor coordinate system = an unintended domain shift)."""
+        c = MessyWorld(rng if rng is not None else np.random.default_rng(),
+                       obs_dim=self.obs_dim, obs_noise=self.obs_noise,
+                       noise_gain=self.noise_gain, nonlinear=self.nonlinear)
+        c.W = self.W.copy(); c.b = self.b.copy(); c.reset()
+        return c
+
     def true_m3(self):
         return float(self.z[M3])
 

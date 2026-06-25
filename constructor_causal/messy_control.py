@@ -57,9 +57,9 @@ def oracle_control(world, budget, hold=6, band=4.0):
     while steps < budget and not reached:
         best, best_v = None, -1e9
         for (c0, c1) in CTRL_SETPOINTS:
-            w2 = MessyWorld(noise_gain=world.noise_gain); w2.z = world.z.copy()
+            w2 = world.clone(); w2.z = world.z.copy()
             for _ in range(hold):
-                w2.step(np.array([c0, c1, 0.0], np.float32), )
+                w2.step(np.array([c0, c1, 0.0], np.float32))
             if w2.true_m3() > best_v:
                 best_v, best = w2.true_m3(), (c0, c1)
         for _ in range(hold):
@@ -75,7 +75,7 @@ def run(agent, seed, n=4000, budget=24):
     rng = np.random.default_rng(seed)
     ew = MessyWorld(rng, obs_dim=14, nonlinear=True); ew.reset()
     Ob, A, Oa, Zb, Za = collect(ew, n, rng)
-    gw = MessyWorld(np.random.default_rng(seed + 999), obs_dim=14, nonlinear=True); gw.reset()
+    gw = ew.clone(np.random.default_rng(seed + 999))    # SAME sensor map, fresh episode
     if agent == "oracle":
         return oracle_control(gw, budget)
     if agent == "causal_split":

@@ -24,6 +24,7 @@ import torch.nn as nn
 
 from .messy_world import MessyWorld, M1, M2, M3, N, A0, A1, AN
 from .repr_encoder import collect, r2_multi
+from .device import get_device
 
 
 def _mlp(sizes):
@@ -80,19 +81,23 @@ def _cross_cov(zc, zn):
 
 def train_split(Ob, A, Oa, dc=4, dn=2, epochs=8000, lr=1e-3, seed=0,
                 recon_w=1.0, inv_w=1.0, vic_w=2.0, cross_w=2.0,
-                bilinear=True, inv_all=False, use_zn=True):
+                bilinear=True, inv_all=False, use_zn=True, device=None):
     """Ablation flags (all default to the full model):
        bilinear=False -> linear-only forward (drop the structured AND-gate term)
        inv_all=True   -> inverse predicts ALL actions incl. the noise knob aN (not control-only)
        use_zn=False   -> no noise latent (dn=0)
-       cross_w=0      -> no z_c/z_n decorrelation penalty"""
+       cross_w=0      -> no z_c/z_n decorrelation penalty
+    device: 'cuda'/'mps'/'cpu' or None (auto). Model is returned on CPU for downstream use."""
+    dev = get_device(device)
     torch.manual_seed(seed)
     if not use_zn:
         dn = 0
-    Ot = torch.tensor(Ob); On = torch.tensor(Oa); At = torch.tensor(A)
+    Ot = torch.as_tensor(Ob, dtype=torch.float32, device=dev)
+    On = torch.as_tensor(Oa, dtype=torch.float32, device=dev)
+    At = torch.as_tensor(A, dtype=torch.float32, device=dev)
     Act = At[:, CTRL]
     inv_tgt = At if inv_all else Act
-    m = SplitModel(Ob.shape[1], dc, dn, bilinear=bilinear, inv_all=inv_all)
+    m = SplitModel(Ob.shape[1], dc, dn, bilinear=bilinear, inv_all=inv_all).to(dev)
     opt = torch.optim.Adam(m.parameters(), lr=lr)
     for ep in range(epochs):
         zc, zn = m.encode(Ot); zcn, znn = m.encode(On)
@@ -106,11 +111,11 @@ def train_split(Ob, A, Oa, dc=4, dn=2, epochs=8000, lr=1e-3, seed=0,
         if dn > 0:
             vn, cn = _vic(zn); cross = _cross_cov(zc, zn)
         else:
-            vn = cn = cross = torch.zeros((), dtype=zc.dtype)
+            vn = cn = cross = torch.zeros((), dtype=zc.dtype, device=dev)
         loss = (fwd + recon_w * recon + inv_w * inv + vic_w * (vc + vn) + cc + cn
                 + cross_w * cross)
         opt.zero_grad(); loss.backward(); opt.step()
-    return m
+    return m.to("cpu")
 
 
 def main(seed=0, n=4000, dc=4, dn=2):

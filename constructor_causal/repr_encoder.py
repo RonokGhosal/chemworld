@@ -77,10 +77,14 @@ def _vicreg(z):
 
 
 def train_encoder(Ob, A, Oa, dz=4, epochs=4000, lr=1e-3, inv_w=2.0, var_w=2.0, cov_w=1.0,
-                  hetero=True, predictive=True, inverse=True, seed=0):
+                  hetero=True, predictive=True, inverse=True, seed=0, device=None):
+    from .device import get_device
+    dev = get_device(device)
     torch.manual_seed(seed)
-    Ot = torch.tensor(Ob); On = torch.tensor(Oa); At = torch.tensor(A)   # ALIGNED triples
-    m = ReprModel(Ob.shape[1], dz)
+    Ot = torch.as_tensor(Ob, dtype=torch.float32, device=dev)       # ALIGNED triples
+    On = torch.as_tensor(Oa, dtype=torch.float32, device=dev)
+    At = torch.as_tensor(A, dtype=torch.float32, device=dev)
+    m = ReprModel(Ob.shape[1], dz).to(dev)
     opt = torch.optim.Adam(m.parameters(), lr=lr)
     for ep in range(epochs):
         z, zn = m.encode(Ot), m.encode(On)
@@ -98,7 +102,7 @@ def train_encoder(Ob, A, Oa, dz=4, epochs=4000, lr=1e-3, inv_w=2.0, var_w=2.0, c
         v, c = _vicreg(z)
         loss = loss + var_w * v + cov_w * c
         opt.zero_grad(); loss.backward(); opt.step()
-    return m
+    return m.to("cpu")
 
 
 def r2_multi(Zhat, targets, nonlinear=False):

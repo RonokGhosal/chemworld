@@ -27,10 +27,11 @@ import numpy as np
 import torch
 from sklearn.linear_model import LogisticRegression
 
-from .messy_world import MessyWorld, M3
+from .messy_world import MessyWorld, M1, M2, M3, N
 from .messy_control import mpc_split, _mpc_generic, oracle_control, fit_readout
-from .repr_encoder import collect, train_encoder
+from .repr_encoder import collect, train_encoder, r2_multi
 from .split_encoder import train_split
+from .checkpoint import checkpointer
 
 BANDS = [8.0, 12.0]
 BUDGET = 18
@@ -47,6 +48,14 @@ def noleak_readout(zc_cal, labels):
     return np.append(clf.coef_[0], clf.intercept_[0])
 
 
+def _holdout_r2(z, m3, frac=0.8):
+    n = len(z); tr = int(frac * n)
+    X = np.column_stack([z[:tr], np.ones(tr)])
+    b, *_ = np.linalg.lstsq(X, m3[:tr], rcond=None)
+    Xte = np.column_stack([z[tr:], np.ones(n - tr)]); t = m3[tr:]
+    return float(max(0.0, 1 - ((t - Xte @ b) ** 2).sum() / ((t - t.mean()) ** 2).sum()))
+
+
 def main(seeds=range(5), n=4000, world_kw=None, label=""):
     wk = world_kw or dict(obs_dim=14, nonlinear=True)
     print("=" * 90)
@@ -56,6 +65,8 @@ def main(seeds=range(5), n=4000, world_kw=None, label=""):
     print("=" * 90)
     agents = ["causal_noleak", "causal_diag", "prediction_first", "oracle"]
     per = {bd: {a: [] for a in agents} for bd in BANDS}
+    run_name = "noleak_harder" if wk.get("n_distract") else "noleak"
+    write, path = checkpointer(run_name)
 
     for s in seeds:
         rng = np.random.default_rng(s)
@@ -64,7 +75,13 @@ def main(seeds=range(5), n=4000, world_kw=None, label=""):
         sm = train_split(Ob, A, Oa, seed=s)
         pm = train_encoder(Ob, A, Oa, dz=6, hetero=False, inverse=False, seed=s)
         with torch.no_grad():
-            zc = sm.encode(torch.tensor(Oa))[0].numpy(); zp = pm.encode(torch.tensor(Oa)).numpy()
+            zc_t, zn_t = sm.encode(torch.tensor(Oa))
+            zc = zc_t.numpy(); zn = zn_t.numpy(); zp = pm.encode(torch.tensor(Oa)).numpy()
+        # representation metrics + held-out readout R2 (same privilege for causal & prediction)
+        rcc = r2_multi(zc, {"m1": Za[:, M1], "m2": Za[:, M2], "m3": Za[:, M3], "noise": Za[:, N]})
+        chain = float(np.mean([rcc["m1"], rcc["m2"], rcc["m3"]])); zc_noise = float(rcc["noise"])
+        zn_noise = float(r2_multi(zn, {"noise": Za[:, N]})["noise"]) if zn.shape[1] > 0 else float("nan")
+        r2_diag = _holdout_r2(zc, Za[:, M3]); r2_pred = _holdout_r2(zp, Za[:, M3])
         rd_diag = fit_readout(zc, Za[:, M3])          # 4000 hidden-M3 labels (diagnostic)
         rd_p = fit_readout(zp, Za[:, M3])
         # NO-LEAK: K observations, binary observable label at a low visible threshold tau
@@ -72,13 +89,21 @@ def main(seeds=range(5), n=4000, world_kw=None, label=""):
         idx = rng.choice(len(zc), K, replace=False)
         lab = (Za[idx, M3] >= tau).astype(int)
         rd_nl = noleak_readout(zc[idx], lab)
+        rec = dict(run=run_name, seed=int(s), chain=chain, zc_noise=zc_noise, zn_noise=zn_noise,
+                   readout_r2_causal=r2_diag, readout_r2_pred=r2_pred, tau=tau, bands={})
         for bd in BANDS:
             seed_rng = lambda: np.random.default_rng(s + 999)   # same episode for all agents
-            per[bd]["causal_noleak"].append(
-                mpc_split(ew.clone(seed_rng()), sm, rd_nl, BUDGET, band=bd)[0] if rd_nl is not None else False)
-            per[bd]["causal_diag"].append(mpc_split(ew.clone(seed_rng()), sm, rd_diag, BUDGET, band=bd)[0])
-            per[bd]["prediction_first"].append(_mpc_generic(ew.clone(seed_rng()), pm, rd_p, BUDGET, band=bd)[0])
-            per[bd]["oracle"].append(oracle_control(ew.clone(seed_rng()), BUDGET, band=bd)[0])
+            nl = mpc_split(ew.clone(seed_rng()), sm, rd_nl, BUDGET, band=bd) if rd_nl is not None else (False, float("nan"))
+            di = mpc_split(ew.clone(seed_rng()), sm, rd_diag, BUDGET, band=bd)
+            pr = _mpc_generic(ew.clone(seed_rng()), pm, rd_p, BUDGET, band=bd)
+            orc = oracle_control(ew.clone(seed_rng()), BUDGET, band=bd)
+            per[bd]["causal_noleak"].append(nl[0]); per[bd]["causal_diag"].append(di[0])
+            per[bd]["prediction_first"].append(pr[0]); per[bd]["oracle"].append(orc[0])
+            rec["bands"][str(int(bd))] = dict(
+                causal_noleak=[bool(nl[0]), float(nl[1])], causal_diag=[bool(di[0]), float(di[1])],
+                prediction_first=[bool(pr[0]), float(pr[1])], oracle=[bool(orc[0]), float(orc[1])])
+        write(rec)
+        print(f"  seed {s} done (chain={chain:.2f} zc_noise={zc_noise:.2f}) -> {path}")
 
     sl = list(seeds)
     for bd in BANDS:

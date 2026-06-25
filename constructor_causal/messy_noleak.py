@@ -56,6 +56,43 @@ def _holdout_r2(z, m3, frac=0.8):
     return float(max(0.0, 1 - ((t - Xte @ b) ** 2).sum() / ((t - t.mean()) ** 2).sum()))
 
 
+def seed_record(s, n=4000, world_kw=None):
+    """Run ONE seed end-to-end and return its full record dict (no I/O). This is the unit of
+    parallel/resumable work for run_seeds.py; main() also calls it."""
+    wk = world_kw or dict(obs_dim=14, nonlinear=True)
+    run_name = "noleak_harder" if wk.get("n_distract") else "noleak"
+    rng = np.random.default_rng(s)
+    ew = MessyWorld(rng, **wk); ew.reset()
+    Ob, A, Oa, Zb, Za = collect(ew, n, rng)
+    sm = train_split(Ob, A, Oa, seed=s)
+    pm = train_encoder(Ob, A, Oa, dz=6, hetero=False, inverse=False, seed=s)
+    with torch.no_grad():
+        zc_t, zn_t = sm.encode(torch.tensor(Oa))
+        zc = zc_t.numpy(); zn = zn_t.numpy(); zp = pm.encode(torch.tensor(Oa)).numpy()
+    rcc = r2_multi(zc, {"m1": Za[:, M1], "m2": Za[:, M2], "m3": Za[:, M3], "noise": Za[:, N]})
+    chain = float(np.mean([rcc["m1"], rcc["m2"], rcc["m3"]])); zc_noise = float(rcc["noise"])
+    zn_noise = float(r2_multi(zn, {"noise": Za[:, N]})["noise"]) if zn.shape[1] > 0 else float("nan")
+    r2_diag = _holdout_r2(zc, Za[:, M3]); r2_pred = _holdout_r2(zp, Za[:, M3])
+    rd_diag = fit_readout(zc, Za[:, M3])              # 4000 hidden-M3 labels (diagnostic)
+    rd_p = fit_readout(zp, Za[:, M3])
+    tau = float(np.quantile(Za[:, M3], 0.75))         # low visible threshold for K binary labels
+    idx = rng.choice(len(zc), K, replace=False)
+    lab = (Za[idx, M3] >= tau).astype(int)
+    rd_nl = noleak_readout(zc[idx], lab)
+    rec = dict(run=run_name, seed=int(s), chain=chain, zc_noise=zc_noise, zn_noise=zn_noise,
+               readout_r2_causal=r2_diag, readout_r2_pred=r2_pred, tau=tau, bands={})
+    for bd in BANDS:
+        seed_rng = lambda: np.random.default_rng(s + 999)    # same episode for all agents
+        nl = mpc_split(ew.clone(seed_rng()), sm, rd_nl, BUDGET, band=bd) if rd_nl is not None else (False, float("nan"))
+        di = mpc_split(ew.clone(seed_rng()), sm, rd_diag, BUDGET, band=bd)
+        pr = _mpc_generic(ew.clone(seed_rng()), pm, rd_p, BUDGET, band=bd)
+        orc = oracle_control(ew.clone(seed_rng()), BUDGET, band=bd)
+        rec["bands"][str(int(bd))] = dict(
+            causal_noleak=[bool(nl[0]), float(nl[1])], causal_diag=[bool(di[0]), float(di[1])],
+            prediction_first=[bool(pr[0]), float(pr[1])], oracle=[bool(orc[0]), float(orc[1])])
+    return rec
+
+
 def main(seeds=range(5), n=4000, world_kw=None, label=""):
     wk = world_kw or dict(obs_dim=14, nonlinear=True)
     print("=" * 90)
@@ -69,41 +106,12 @@ def main(seeds=range(5), n=4000, world_kw=None, label=""):
     write, path = checkpointer(run_name)
 
     for s in seeds:
-        rng = np.random.default_rng(s)
-        ew = MessyWorld(rng, **wk); ew.reset()
-        Ob, A, Oa, Zb, Za = collect(ew, n, rng)
-        sm = train_split(Ob, A, Oa, seed=s)
-        pm = train_encoder(Ob, A, Oa, dz=6, hetero=False, inverse=False, seed=s)
-        with torch.no_grad():
-            zc_t, zn_t = sm.encode(torch.tensor(Oa))
-            zc = zc_t.numpy(); zn = zn_t.numpy(); zp = pm.encode(torch.tensor(Oa)).numpy()
-        # representation metrics + held-out readout R2 (same privilege for causal & prediction)
-        rcc = r2_multi(zc, {"m1": Za[:, M1], "m2": Za[:, M2], "m3": Za[:, M3], "noise": Za[:, N]})
-        chain = float(np.mean([rcc["m1"], rcc["m2"], rcc["m3"]])); zc_noise = float(rcc["noise"])
-        zn_noise = float(r2_multi(zn, {"noise": Za[:, N]})["noise"]) if zn.shape[1] > 0 else float("nan")
-        r2_diag = _holdout_r2(zc, Za[:, M3]); r2_pred = _holdout_r2(zp, Za[:, M3])
-        rd_diag = fit_readout(zc, Za[:, M3])          # 4000 hidden-M3 labels (diagnostic)
-        rd_p = fit_readout(zp, Za[:, M3])
-        # NO-LEAK: K observations, binary observable label at a low visible threshold tau
-        tau = float(np.quantile(Za[:, M3], 0.75))
-        idx = rng.choice(len(zc), K, replace=False)
-        lab = (Za[idx, M3] >= tau).astype(int)
-        rd_nl = noleak_readout(zc[idx], lab)
-        rec = dict(run=run_name, seed=int(s), chain=chain, zc_noise=zc_noise, zn_noise=zn_noise,
-                   readout_r2_causal=r2_diag, readout_r2_pred=r2_pred, tau=tau, bands={})
+        rec = seed_record(s, n, wk)
         for bd in BANDS:
-            seed_rng = lambda: np.random.default_rng(s + 999)   # same episode for all agents
-            nl = mpc_split(ew.clone(seed_rng()), sm, rd_nl, BUDGET, band=bd) if rd_nl is not None else (False, float("nan"))
-            di = mpc_split(ew.clone(seed_rng()), sm, rd_diag, BUDGET, band=bd)
-            pr = _mpc_generic(ew.clone(seed_rng()), pm, rd_p, BUDGET, band=bd)
-            orc = oracle_control(ew.clone(seed_rng()), BUDGET, band=bd)
-            per[bd]["causal_noleak"].append(nl[0]); per[bd]["causal_diag"].append(di[0])
-            per[bd]["prediction_first"].append(pr[0]); per[bd]["oracle"].append(orc[0])
-            rec["bands"][str(int(bd))] = dict(
-                causal_noleak=[bool(nl[0]), float(nl[1])], causal_diag=[bool(di[0]), float(di[1])],
-                prediction_first=[bool(pr[0]), float(pr[1])], oracle=[bool(orc[0]), float(orc[1])])
+            for a in agents:
+                per[bd][a].append(rec["bands"][str(int(bd))][a][0])
         write(rec)
-        print(f"  seed {s} done (chain={chain:.2f} zc_noise={zc_noise:.2f}) -> {path}")
+        print(f"  seed {s} done (chain={rec['chain']:.2f} zc_noise={rec['zc_noise']:.2f}) -> {path}")
 
     sl = list(seeds)
     for bd in BANDS:

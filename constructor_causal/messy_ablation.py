@@ -41,6 +41,34 @@ BUDGET = 18
 H = 12
 
 
+def seed_records(s, n=4000):
+    """Run ONE seed across all ablation variants; return a list of variant record dicts (no I/O).
+    Unit of parallel/resumable work for run_seeds.py."""
+    rng = np.random.default_rng(s)
+    ew = MessyWorld(rng, obs_dim=14, nonlinear=True); ew.reset()
+    Ob, A, Oa, Zb, Za = collect(ew, n, rng)
+    true12 = _true_traj(ew, H)
+    tgt = {"m1": Za[:, M1], "m2": Za[:, M2], "m3": Za[:, M3], "noise": Za[:, N]}
+    out = []
+    for v, kw in VARIANTS.items():
+        m = train_split(Ob, A, Oa, seed=s, **kw)
+        with torch.no_grad():
+            zc, zn = m.encode(torch.tensor(Oa))
+        zc = zc.numpy(); zn = zn.numpy()
+        rc = r2_multi(zc, tgt)
+        chain = float(np.mean([rc["m1"], rc["m2"], rc["m3"]]))
+        zc_noise = float(rc["noise"])
+        zn_noise = float(r2_multi(zn, {"noise": Za[:, N]})["noise"]) if zn.shape[1] > 0 else float("nan")
+        rd = fit_readout(zc, Za[:, M3])
+        err, slope, _ = _stab(_roll_split(m, ew, rd, H), true12)
+        reached, final_m3 = mpc_split(ew.clone(np.random.default_rng(s + 999)), m, rd, BUDGET, band=BAND)
+        out.append(dict(run="ablation", seed=int(s), variant=v, chain=chain, zc_noise=zc_noise,
+                        zn_noise=zn_noise, rollout_err=float(err), rollout_slope=float(slope),
+                        control_success=bool(reached), final_m3=float(final_m3),
+                        failure=None if reached else f"m3={final_m3:.1f}<{BAND:.0f}"))
+    return out
+
+
 def main(seeds=range(10), n=4000):
     print("=" * 96)
     print(f"ARCHITECTURE ABLATION UNDER SUPERVISED READOUT -- band m3>={BAND:.0f}, "
@@ -50,30 +78,12 @@ def main(seeds=range(10), n=4000):
     res = {v: {"chain": [], "zc_noise": [], "zn_noise": [], "err": [], "slope": [], "succ": []}
            for v in VARIANTS}
     for s in seeds:
-        rng = np.random.default_rng(s)
-        ew = MessyWorld(rng, obs_dim=14, nonlinear=True); ew.reset()
-        Ob, A, Oa, Zb, Za = collect(ew, n, rng)
-        true12 = _true_traj(ew, H)
-        tgt = {"m1": Za[:, M1], "m2": Za[:, M2], "m3": Za[:, M3], "noise": Za[:, N]}
-        for v, kw in VARIANTS.items():
-            m = train_split(Ob, A, Oa, seed=s, **kw)
-            with torch.no_grad():
-                zc, zn = m.encode(torch.tensor(Oa))
-            zc = zc.numpy(); zn = zn.numpy()
-            rc = r2_multi(zc, tgt)
-            chain = float(np.mean([rc["m1"], rc["m2"], rc["m3"]]))
-            zc_noise = float(rc["noise"])
-            zn_noise = float(r2_multi(zn, {"noise": Za[:, N]})["noise"]) if zn.shape[1] > 0 else float("nan")
-            rd = fit_readout(zc, Za[:, M3])
-            err, slope, _ = _stab(_roll_split(m, ew, rd, H), true12)
-            reached, final_m3 = mpc_split(ew.clone(np.random.default_rng(s + 999)), m, rd, BUDGET, band=BAND)
-            write(dict(run="ablation", seed=int(s), variant=v, chain=chain, zc_noise=zc_noise,
-                       zn_noise=zn_noise, rollout_err=float(err), rollout_slope=float(slope),
-                       control_success=bool(reached), final_m3=float(final_m3),
-                       failure=None if reached else f"m3={final_m3:.1f}<{BAND:.0f}"))
-            r = res[v]
-            r["chain"].append(chain); r["zc_noise"].append(zc_noise); r["zn_noise"].append(zn_noise)
-            r["err"].append(float(err)); r["slope"].append(float(slope)); r["succ"].append(bool(reached))
+        for rec in seed_records(s, n):
+            write(rec)
+            r = res[rec["variant"]]
+            r["chain"].append(rec["chain"]); r["zc_noise"].append(rec["zc_noise"])
+            r["zn_noise"].append(rec["zn_noise"]); r["err"].append(rec["rollout_err"])
+            r["slope"].append(rec["rollout_slope"]); r["succ"].append(rec["control_success"])
         print(f"  seed {s} done -> {path}")
 
     print(f"\n  {'variant':>18} {'zc->chain':>10} {'zc->noise':>10} {'zn->noise':>10} "

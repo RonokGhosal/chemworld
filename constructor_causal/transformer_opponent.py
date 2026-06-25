@@ -11,6 +11,8 @@ Decoder-only, causal mask: input token t = [state_t, action_t]; target = state_{
 """
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -57,9 +59,16 @@ def n_params(m):
     return sum(p.numel() for p in m.parameters())
 
 
-def train(model, S, A, epochs=200, lr=3e-4, batch=64, device=None, log_every=50):
+def train(model, S, A, epochs=200, lr=3e-4, batch=64, device=None, log_every=50, amp=True):
+    """amp=True enables fp16 mixed precision ON CUDA (uses tensor cores -> the real GPU win).
+    No-op on cpu/mps, so the same call is correct everywhere."""
     dev = get_device(device)
     model = model.to(dev)
+    use_amp = amp and dev.type == "cuda"
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    except (AttributeError, TypeError):
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     S = torch.as_tensor(S, dtype=torch.float32)
     A = torch.as_tensor(A, dtype=torch.float32)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -67,11 +76,15 @@ def train(model, S, A, epochs=200, lr=3e-4, batch=64, device=None, log_every=50)
     for ep in range(epochs):
         idx = torch.randint(0, N, (min(batch, N),))
         s = S[idx].to(dev); a = A[idx].to(dev)
-        pred = model(s, a)                            # predict next state at each position
-        loss = ((pred[:, :-1] - s[:, 1:]) ** 2).mean()
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad()
+        ctx = torch.autocast("cuda", dtype=torch.float16) if use_amp else contextlib.nullcontext()
+        with ctx:
+            pred = model(s, a)                        # predict next state at each position
+            loss = ((pred[:, :-1] - s[:, 1:]) ** 2).mean()
+        scaler.scale(loss).backward()
+        scaler.step(opt); scaler.update()
         if log_every and (ep % log_every == 0 or ep == epochs - 1):
-            print(f"    ep {ep:>4}  loss {loss.item():.4f}  [{dev}]")
+            print(f"    ep {ep:>4}  loss {loss.item():.4f}  [{dev}{' amp' if use_amp else ''}]")
     return model.to("cpu")
 
 
@@ -82,12 +95,14 @@ if __name__ == "__main__":
     n_vars = int(sys.argv[1]) if len(sys.argv) > 1 else 32
     d = int(sys.argv[2]) if len(sys.argv) > 2 else 256
     layers = int(sys.argv[3]) if len(sys.argv) > 3 else 6
+    batch = int(sys.argv[4]) if len(sys.argv) > 4 else 256        # bigger batch saturates a GPU
     rng = np.random.default_rng(0)
     w = BigWorld(n_vars=n_vars, n_act=8, rng=rng)
-    S, A = collect_trajectories(w, n_traj=256, T=64, rng=rng)
-    print(f"world n_vars={n_vars}  data S{tuple(S.shape)} A{tuple(A.shape)}")
+    S, A = collect_trajectories(w, n_traj=512, T=64, rng=rng)
+    print(f"world n_vars={n_vars}  data S{tuple(S.shape)} A{tuple(A.shape)}  batch={batch}")
     m = StateTransformer(n_vars, 8, d=d, h=8, layers=layers, max_len=64)
     print(f"StateTransformer d={d} layers={layers} -> {n_params(m):,} params  device={get_device()}")
     t = time.time()
-    train(m, S, A, epochs=200, device=None)
-    print(f"trained 200 steps in {time.time()-t:.1f}s")
+    train(m, S, A, epochs=200, batch=batch, device=None)
+    dt = time.time() - t
+    print(f"trained 200 steps in {dt:.1f}s  ({1000*dt/200:.0f} ms/step)")

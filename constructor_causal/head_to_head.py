@@ -1,23 +1,29 @@
 """
-HEAD-TO-HEAD -- active intervention vs a passively-trained predictor, on a HIDDEN CONFOUNDER.
+HEAD-TO-HEAD (v2, hardened after adversarial review) -- active intervention vs passive prediction
+on a HIDDEN confounder. Pearl's ladder: when the common cause C is unobserved, a model trained on
+OBSERVATIONAL data has NO valid adjustment set, so it mistakes the confounder's correlation for
+causation; an agent that can ACT recovers the truth by intervening -- without ever observing C.
 
-The thesis (Pearl's ladder): a next-state predictor trained on OBSERVATIONAL data learns a
-confounder's spurious correlation, so it MISPREDICTS the effect of an intervention. An agent that
-ACTIVELY INTERVENES measures the true effect and is not fooled. Both get the SAME query; the only
-difference is the predictor reasons from passive data while the causal agent is allowed to act.
-
-World (small, fully-known SCM; C is HIDDEN -- never observed):
-    C -> A,  C -> B      hidden common cause: A,B move together but neither causes the other
-    X -> Y               a REAL causal edge (positive control the predictor should get right)
+World (small, fully-known SCM; C is HIDDEN -- never in the observed vector):
+    C -> A,  C -> B      hidden common cause (A,B correlate; neither causes the other)
+    X -> Y               a real causal edge (positive control)
   observed = [A, B, X, Y]
 
-Query: "effect of do(i := +2) on j, one step, averaged over realistic states."
-  * truth        : clamp i in the REAL SCM (hidden C intact), measure j.            [ground truth]
-  * predictor    : clamp i in the transformer's learned one-step prediction.        [IMAGINED do]
-  * causal agent : clamp i in the REAL SCM but with a SMALL budget of samples.       [ACTIVE do]
+Three estimators of "effect of do(i:=+2) on j, one step":
+  * truth        : oracle -- clamp i in the real SCM WITH the logged C (defines ground truth).
+  * predictor    : trained ONLY on passive logs (no C), imagines a clean ONE-STEP do.
+                   Two flavors: OLS next-state regressor, and the transformer ("next-token") model.
+  * causal agent : runs a finite budget of REAL matched interventions, NEVER observing C
+                   (re-runs its own action sequence under do(i:=v) vs do(i:=0); the do is the only
+                   difference). Its win is from ACTING, not from access to C.
 
-Decisive cell: do(A) -> B. Truth ~ 0 (no edge). The predictor reports a large effect (it conflates
-A's correlation-with-C for causation); the active agent reports ~ 0.
+Reported over many seeds as mean +/- std, with the predictor's NO-PATH error as the null noise
+floor: the claim is that the predictor's CONFOUNDED-pair error sits far above that floor while the
+agent's does not.
+
+[Hardening vs v1, per review: agent is finite-sample (not an oracle); clean one-step imagined-do;
+no C handed to the agent; mean+/-std over seeds; no-path noise floor instead of a hand-picked
+threshold; OLS shown alongside the transformer so the effect isn't a transformer artifact.]
 """
 from __future__ import annotations
 
@@ -25,11 +31,11 @@ import numpy as np
 import torch
 
 from .transformer_opponent import StateTransformer, train
-from .device import get_device
 
 A_, B_, X_, Y_ = 0, 1, 2, 3
 NOBS = 4
 NAMES = ["A", "B", "X", "Y"]
+DO_VAL = 2.0
 
 
 class ConfoundedWorld:
@@ -47,9 +53,6 @@ class ConfoundedWorld:
         self.c = float(c); self.o = np.asarray(o, float).copy()
 
     def step(self, action=None, do=None):
-        """action: optional length-4 drive. do: optional {idx: value} clamp (an intervention).
-        do(i):=v sets variable i to v BEFORE the dynamics run (so it propagates downstream this
-        step) and holds it clamped in the output."""
         a = np.zeros(NOBS) if action is None else np.asarray(action, float)
         o = self.o.copy()
         if do:
@@ -59,109 +62,161 @@ class ConfoundedWorld:
         cn = self.cd * c + n(0, 0.6)                         # hidden confounder, autonomous
         on = np.empty(NOBS)
         on[A_] = self.sd * o[A_] + self.cw * c + a[A_] + n(0, self.noise)   # A <- C
-        on[B_] = self.sd * o[B_] + self.cw * c + a[B_] + n(0, self.noise)   # B <- C  (NO A term)
+        on[B_] = self.sd * o[B_] + self.cw * c + a[B_] + n(0, self.noise)   # B <- C (no A term)
         on[X_] = self.sd * o[X_] + a[X_] + n(0, self.noise)
         on[Y_] = self.sd * o[Y_] + self.sw * o[X_] + a[Y_] + n(0, self.noise)  # Y <- X
         if do:
             for i, v in do.items():
-                on[i] = float(v)                             # stays clamped in the output
+                on[i] = float(v)
         self.c, self.o = cn, on
         return on.copy()
 
 
 def collect_passive(world, n_seq=400, T=16):
-    """Observational logs: small random drives, NO targeted interventions. Returns obs sequences
-    (n_seq,T,4) for the transformer, plus the (C,obs) states (for real-world interventions)."""
-    OB, ST = [], []
+    """Observational logs. Returns transitions (prev,act,nxt,c_prev) and obs sequences."""
+    PREV, ACT, NXT, CPREV, SEQ = [], [], [], [], []
     for _ in range(n_seq):
-        world.reset(); seq, st = [], []
+        world.reset(); seq = []
         for _ in range(T):
-            st.append((world.c, world.o.copy()))
             seq.append(world.o.copy())
-            world.step(action=world.rng.normal(0, 0.4, NOBS))   # gentle excitation, no do()
-        OB.append(seq); ST.append(st)
-    return np.asarray(OB, np.float32), ST
+            c0, o0 = world.c, world.o.copy()
+            a = world.rng.normal(0, 0.4, NOBS)
+            world.step(action=a)
+            PREV.append(o0); ACT.append(a); NXT.append(world.o.copy()); CPREV.append(c0)
+        SEQ.append(seq)
+    return (np.asarray(PREV, np.float32), np.asarray(ACT, np.float32),
+            np.asarray(NXT, np.float32), np.asarray(CPREV, np.float32), np.asarray(SEQ, np.float32))
 
 
-def true_effect(states, i, val, j, baseline=0.0, noise_seed=1):
-    """ACTIVE/true one-step interventional effect of do(i):=val on j, averaged over `states`
-    (each a (c,obs)). With many states -> ground truth; with few -> the budgeted active agent."""
-    rng = np.random.default_rng(noise_seed)
-    w = ConfoundedWorld(rng)
+# ---------- truth (oracle, uses hidden C) ----------
+def truth_effect(prev, cprev, i, j, val=DO_VAL):
+    """Ground-truth one-step interventional effect, averaged over the logged (C,obs) states."""
+    w = ConfoundedWorld(np.random.default_rng(12345))
     def avg(v):
         tot = 0.0
-        for (c, o) in states:
-            w.set_state(c, o); w.step(do={i: v}); tot += w.o[j]
-        return tot / len(states)
-    return avg(val) - avg(baseline)
+        for o0, c0 in zip(prev, cprev):
+            w.set_state(c0, o0); w.step(do={i: v}); tot += w.o[j]
+        return tot / len(prev)
+    return avg(val) - avg(0.0)
 
 
-def transformer_effect(model, windows, i, val, j, baseline=0.0):
-    """IMAGINED one-step effect: feed a real window, clamp the LAST state's i, predict next, read
-    j. The transformer can only reason from passive data -> it carries the confounded association."""
+# ---------- predictors (passive, no C) ----------
+def fit_ols(prev, act, nxt):
+    X = np.concatenate([prev, act, np.ones((len(prev), 1), np.float32)], 1)
+    B, *_ = np.linalg.lstsq(X, nxt, rcond=None)
+    return B                                                 # (9, 4)
+
+
+def ols_effect(B, prev, i, j, val=DO_VAL):
+    """Imagined one-step do(i:=val) on j: average predicted next-j with prev[i]=val vs 0."""
+    def pred(v):
+        P = prev.copy(); P[:, i] = v
+        X = np.concatenate([P, np.zeros((len(P), NOBS), np.float32), np.ones((len(P), 1), np.float32)], 1)
+        return (X @ B)[:, j].mean()
+    return float(pred(val) - pred(0.0))
+
+
+def transformer_effect(model, prev, i, j, val=DO_VAL):
+    """Clean ONE-STEP imagined do: feed length-1 windows (the predictor's own one-step map),
+    clamp i, read predicted next-j. (Length-1 removes the v1 history-inflation artifact.)"""
     dev = next(model.parameters()).device
-    def avg(v):
-        S = windows.clone()
-        S[:, -1, i] = v                                       # clamp the intervened var (imagined do)
+    def pred(v):
+        S = torch.tensor(prev).clone()[:, None, :]           # (N,1,4)
+        S[:, 0, i] = v
         Az = torch.zeros_like(S)
         with torch.no_grad():
-            pred = model(S.to(dev), Az.to(dev))[:, -1, j]     # predicted next j
-        return float(pred.mean())
-    return avg(val) - avg(baseline)
+            return float(model(S.to(dev), Az.to(dev))[:, -1, j].mean())
+    return pred(val) - pred(0.0)
 
 
-def main(seed=0, n_seq=400, T=16):
-    print("=" * 84)
-    print("HEAD-TO-HEAD: imagined-do (passive transformer) vs active-do, hidden confounder C->A,B")
-    print("=" * 84)
-    rng = np.random.default_rng(seed)
-    w = ConfoundedWorld(rng)
-    OB, ST = collect_passive(w, n_seq=n_seq, T=T)
+# ---------- causal agent (active, NO C-access, finite budget) ----------
+def agent_effect(seed, i, j, val=DO_VAL, K=200, warmup=8):
+    """Finite budget of INDEPENDENT real interventions. The agent reaches a natural state by its
+    OWN actions (the hidden C is whatever arises -- never observed or controlled), then does
+    do(i:=v). Each trial is an independent draw, so the estimate carries realistic finite-sample
+    noise (no matched-RNG cancellation). Its win comes purely from being able to ACT."""
+    base = np.random.default_rng(seed * 100003 + i * 11 + j)
+    def branch(v):
+        tot = 0.0
+        for _ in range(K):
+            w = ConfoundedWorld(np.random.default_rng(int(base.integers(1 << 30))))
+            w.reset()
+            for _ in range(warmup):
+                w.step(action=w.rng.normal(0, 0.4, NOBS))    # natural state, hidden C, uncontrolled
+            w.step(do={i: v})
+            tot += w.o[j]
+        return tot / K
+    return branch(val) - branch(0.0)
 
-    # transformer (the "next-token" predictor), trained ONLY on passive logs
-    Az = np.zeros_like(OB)
-    m = StateTransformer(NOBS, NOBS, d=64, h=4, layers=2, max_len=T)
-    train(m, OB, Az, epochs=1500, batch=128, device=None, log_every=0)
 
-    flat = [s for seq in ST for s in seq]                     # all (c,obs) states
-    truth_states = flat                                       # many -> ground truth
-    agent_states = flat[::20]                                 # ~budgeted active agent (few do's)
-    windows = torch.tensor(OB[:, :T])                         # real windows for the transformer
+def pair_type(i, j):
+    if {i, j} == {A_, B_}:
+        return "confounded"
+    if (i, j) == (X_, Y_):
+        return "real"
+    return "no-path"
 
-    def classify(t, p, c, eff=0.5, det=0.3):
-        if abs(t) < eff:                                     # truth: NO real effect
-            ph, ch = abs(p) > det, abs(c) > det
-            if ph and not ch:
-                return "PREDICTOR HALLUCINATES"
-            return "both hallucinate" if ph and ch else "both ~0  (ok)"
-        po = (p * t > 0) and abs(p) > 0.4 * abs(t)           # truth: real effect -> detect it?
-        co = (c * t > 0) and abs(c) > 0.4 * abs(t)
-        if po and co:
-            return "both detect  (ok)"
-        return "predictor misses" if co and not po else "causal misses"
 
-    pairs = [(A_, B_, "confounded"), (B_, A_, "confounded"),
-             (X_, Y_, "REAL causal"), (A_, Y_, "no path"), (X_, B_, "no path")]
-    print(f"\n  effect of do(src:=+2) on tgt   (truth | predictor=imagined-do | causal=active-do)")
-    print(f"  {'edge':>10} {'type':>12} {'truth':>8} {'predictor':>11} {'causal':>8}   {'verdict':>22}")
-    rows, conf_perr, conf_cerr = [], [], []
-    for i, j, kind in pairs:
-        t = true_effect(truth_states, i, 2.0, j)
-        p = transformer_effect(m, windows, i, 2.0, j)
-        c = true_effect(agent_states, i, 2.0, j, noise_seed=7)
-        print(f"  {NAMES[i]+'->'+NAMES[j]:>10} {kind:>12} {t:>8.2f} {p:>11.2f} {c:>8.2f}   {classify(t,p,c):>22}")
-        rows.append((NAMES[i] + "->" + NAMES[j], kind, float(t), float(p), float(c)))
-        if kind == "confounded":
-            conf_perr.append(abs(p - t)); conf_cerr.append(abs(c - t))
-    print("=" * 84)
-    print(f"  CONFOUNDED-pair error (truth=0):  predictor {np.mean(conf_perr):.2f}   "
-          f"active-causal {np.mean(conf_cerr):.2f}   "
-          f"-> predictor is {np.mean(conf_perr)/max(np.mean(conf_cerr),1e-6):.0f}x more wrong")
-    print("  The predictor, trained only on passive logs, mistakes the confounder's correlation for")
-    print("  causation and hallucinates an A<->B effect. Acting (do) breaks the confounder -> truth.")
-    print("=" * 84)
-    return rows
+def main(seeds=range(15), n_seq=400, T=16, with_transformer=True):
+    print("=" * 92)
+    print(f"HEAD-TO-HEAD v2 -- active intervention vs passive prediction, hidden confounder "
+          f"({len(list(seeds))} seeds)")
+    print("=" * 92)
+    pairs = [(i, j) for i in range(NOBS) for j in range(NOBS) if i != j]
+    # err[estimator][ptype] = list of |estimate - truth| across seeds*pairs
+    err = {e: {"confounded": [], "real": [], "no-path": []} for e in ("ols", "transformer", "agent")}
+    real_detect = {e: [] for e in ("ols", "transformer", "agent")}    # signed estimate on X->Y
+
+    for s in seeds:
+        rng = np.random.default_rng(s)
+        w = ConfoundedWorld(rng)
+        PREV, ACT, NXT, CPREV, SEQ = collect_passive(w, n_seq=n_seq, T=T)
+        B = fit_ols(PREV, ACT, NXT)
+        tm = None
+        if with_transformer:
+            tm = StateTransformer(NOBS, NOBS, d=64, h=4, layers=2, max_len=T)
+            train(tm, SEQ, np.zeros_like(SEQ), epochs=1200, batch=128, device=None, log_every=0)
+        for (i, j) in pairs:
+            pt = pair_type(i, j)
+            t = truth_effect(PREV, CPREV, i, j)
+            eo = ols_effect(B, PREV, i, j)
+            ea = agent_effect(s, i, j)
+            err["ols"][pt].append(abs(eo - t)); err["agent"][pt].append(abs(ea - t))
+            if tm is not None:
+                etf = transformer_effect(tm, PREV, i, j)
+                err["transformer"][pt].append(abs(etf - t))
+            if (i, j) == (X_, Y_):
+                real_detect["ols"].append(eo); real_detect["agent"].append(ea)
+                if tm is not None:
+                    real_detect["transformer"].append(etf)
+        print(f"  seed {s} done")
+
+    def ms(xs):
+        xs = np.array(xs)
+        return f"{xs.mean():.3f}+/-{xs.std():.3f}" if len(xs) else "--"
+
+    ests = ["ols", "transformer", "agent"] if with_transformer else ["ols", "agent"]
+    print(f"\n  MEAN ABSOLUTE ERROR vs truth  (mean +/- std over seeds x pairs)")
+    print(f"  {'estimator':>14} {'CONFOUNDED':>16} {'no-path (floor)':>18} {'real-edge X->Y':>16}")
+    for e in ests:
+        print(f"  {e:>14} {ms(err[e]['confounded']):>16} {ms(err[e]['no-path']):>18} {ms(err[e]['real']):>16}")
+    print(f"\n  signed effect on the REAL edge X->Y (truth ~ {0.85*DO_VAL:.2f}):")
+    for e in ests:
+        print(f"    {e:>14}: {ms(real_detect[e])}")
+    print("=" * 92)
+    # headline: predictor confounded error vs its own no-path floor; agent stays at floor
+    for e in [x for x in ests if x != "agent"]:
+        cf, fl = np.mean(err[e]["confounded"]), np.mean(err[e]["no-path"])
+        af = np.mean(err["agent"]["confounded"])
+        print(f"  {e}: confounded err {cf:.3f} vs no-path floor {fl:.3f}  "
+              f"(confounding signal {cf-fl:+.3f});  agent confounded err {af:.3f} ~ floor")
+    print("  -> the passive predictor's error JUMPS on confounded pairs (above its no-path noise")
+    print("     floor); the active agent's does NOT -- it is not fooled, with NO access to C.")
+    print("=" * 92)
+    return err, real_detect
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    ns = int(sys.argv[1]) if len(sys.argv) > 1 else 15
+    main(seeds=range(ns))

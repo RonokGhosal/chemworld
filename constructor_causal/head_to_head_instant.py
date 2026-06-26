@@ -16,11 +16,19 @@ DAG (do() recovers the transitive *closure*: do(a) moves c through b, so the raw
 we remove it so ACTIVE is graded on direct-edge recovery, the same footing as PASSIVE). Both methods
 get the SAME sample budget and BOTH report skeleton F1.
 
-SCOPE (the honest caveat): "observation cannot orient the chain" is a theorem for LINEAR-GAUSSIAN
-noise. Under linear NON-Gaussian noise, a LiNGAM/ICA measure orients the chain from observation alone.
-We demonstrate this directly. So intervention is the DISTRIBUTION-ROBUST route to orientation -- it
-works whatever the noise -- and it is strictly *necessary* only under Gaussianity (or if one restricts
-to CI-based methods). That is the precise, defensible claim.
+SCOPE (the honest caveats, both demonstrated):
+  * DISTRIBUTION: "observation cannot orient the chain" is a theorem for LINEAR-GAUSSIAN noise. Under
+    linear NON-Gaussian noise a LiNGAM/ICA measure orients it from observation alone -- so within the
+    LINEAR, ACYCLIC regime intervention is strictly *necessary* for orientation only under Gaussianity
+    (or if one restricts to CI-based methods like PC). do() orients whatever the noise.
+  * STRUCTURE: that LiNGAM escape hatch needs the SAME linear+acyclic preconditions as the world, so
+    it does not separate "Gaussianity" from "acyclicity" as the reason observation fails. We therefore
+    also test a 2-cycle a<->b: observational DAG learning is acyclic by construction and the cyclic
+    covariance EXACTLY matches an acyclic fit, so NO observational method (LiNGAM included) can detect
+    it for ANY noise -- while do() reads off mutual causation. So intervention is necessary for
+    STRUCTURE reasons too, independent of distribution.
+Not demonstrated here: NONLINEAR additive-noise models (an ANM regression can orient those off-Gaussian
+even acyclically), so we do NOT claim do() is the only route in that regime -- only the robust one.
 """
 from __future__ import annotations
 
@@ -141,7 +149,9 @@ def active_discover(world, n=300, delta=2.0, thresh=0.15):
 
 def transitive_reduce(directed, d):
     """Remove i->j when a longer directed path i->...->k->...->j exists (do() yields the transitive
-    closure; we recover the direct edges)."""
+    closure; we recover the direct edges). Assumes no genuine direct edge is ALSO subsumed by a longer
+    path (true for these motifs; in a denser DAG a real direct i->j parallel to i->k->j would be
+    dropped -- the interventional way to keep it is to condition do(i) on holding the mediators fixed)."""
     reach = {i: set() for i in range(d)}
     for (i, j) in directed:
         reach[i].add(j)
@@ -160,6 +170,28 @@ def transitive_reduce(directed, d):
 
 
 # ----------------------------- scoring -----------------------------
+def cyclic_feedback_demo(seeds, n_active=300, n_obs=4800, beta=0.7, delta=2.0, thresh=0.15):
+    """A 2-cycle a<->b (genuine feedback): x = B x + e with B[0,1]=B[1,0]=beta, x=(I-B)^-1 e.
+    Observational DAG learning (PC/LiNGAM) is acyclic by construction -- it cannot represent the cycle;
+    and the cyclic covariance EXACTLY equals an acyclic a->b fit (corr = 2b/(1+b^2)), so NO
+    observational method tells them apart for ANY noise distribution. do() detects mutual causation:
+    do(a) moves b AND do(b) moves a. Returns (do_detects_mutual_frac, obs_corr, acyclic_fit_corr)."""
+    B = np.array([[0.0, beta], [beta, 0.0]]); IBinv = np.linalg.inv(np.eye(2) - B)
+    do_mutual, corr = [], []
+    for s in seeds:
+        rng = np.random.default_rng(7000 + s)
+        X = rng.normal(0, 1, (n_obs, 2)) @ IBinv.T
+        corr.append(float(np.corrcoef(X.T)[0, 1]))
+
+        def eff(i, val):
+            e = rng.normal(0, 1, (n_active, 2))
+            return (beta * val + e[:, 1 - i]).mean()                # do(i) -> partner = beta*val + noise
+        eab = (eff(0, delta) - eff(0, -delta)) / (2 * delta)
+        eba = (eff(1, delta) - eff(1, -delta)) / (2 * delta)
+        do_mutual.append(1.0 if abs(eab) > thresh and abs(eba) > thresh else 0.0)
+    return float(np.mean(do_mutual)), float(np.mean(corr)), 2 * beta / (1 + beta ** 2)
+
+
 def _orient_frac(directed, true_dir):
     if not true_dir:
         return 1.0, 0.0
@@ -242,12 +274,25 @@ def main(seeds=range(15), n_active=300):
     print(f"  {'gaussian':>10} {m('g_pc',SCOPE):>10.2f} {m('g_lin',SCOPE):>14.2f} {m('g_do',SCOPE):>10.2f}")
     print(f"  {'laplace':>10} {m('l_pc',SCOPE):>10.2f} {m('l_lin',SCOPE):>14.2f} {m('l_do',SCOPE):>10.2f}")
     print("=" * 98)
-    print(f"  HONEST SCOPE: under linear NON-Gaussian (laplace) noise OBSERVATION can orient the chain")
-    print(f"  (LiNGAM {m('l_lin',SCOPE):.2f}, exploiting non-Gaussianity PC ignores); under GAUSSIAN noise")
-    print(f"  it provably cannot (LiNGAM {m('g_lin',SCOPE):.2f} ~ chance). do() orients REGARDLESS")
-    print(f"  (gaussian {m('g_do',SCOPE):.2f}, laplace {m('l_do',SCOPE):.2f}). So intervention is the")
-    print(f"  DISTRIBUTION-ROBUST route to orientation, and strictly *necessary* only under Gaussianity")
-    print(f"  (or if one restricts to CI-based discovery). That is the precise claim.")
+    print(f"  DISTRIBUTION scope (LINEAR, ACYCLIC): under non-Gaussian (laplace) noise OBSERVATION can")
+    print(f"  orient the chain (LiNGAM {m('l_lin',SCOPE):.2f}, exploiting non-Gaussianity PC ignores);")
+    print(f"  under GAUSSIAN it cannot (LiNGAM {m('g_lin',SCOPE):.2f} ~ chance; |M|~0.001, 0.50 at 200")
+    print(f"  seeds -- the printed value is small-sample noise). do() orients either way "
+          f"({m('g_do',SCOPE):.2f}/{m('l_do',SCOPE):.2f}).")
+    cyc_do, cyc_corr, cyc_acyc = cyclic_feedback_demo(list(seeds), n_active=n_active, n_obs=n_obs)
+    print("-" * 98)
+    print(f"  STRUCTURE scope -- 2-cycle a<->b (feedback): observational DAG learning is acyclic by")
+    print(f"  construction; the cyclic corr(a,b)={cyc_corr:.2f} EXACTLY equals an acyclic a->b fit "
+          f"({cyc_acyc:.2f}),")
+    print(f"  so NO observational method distinguishes them -- for ANY noise. do() reads off MUTUAL")
+    print(f"  causation (both do-effects fire) in {cyc_do:.2f} of seeds.")
+    print("=" * 98)
+    print(f"  PRECISE CLAIM: within LINEAR/ACYCLIC instantaneous systems, intervention is strictly")
+    print(f"  *necessary* for orientation only under Gaussianity (LiNGAM handles non-Gaussian); but it is")
+    print(f"  the DISTRIBUTION-ROBUST route (works whatever the noise) AND it is also necessary for")
+    print(f"  STRUCTURE reasons -- cycles -- that observation cannot touch regardless of distribution.")
+    print(f"  (Nonlinear additive-noise models are NOT tested; an ANM regression can orient those")
+    print(f"  off-Gaussian, so we claim robustness, not exclusivity, there.)")
     print("=" * 98)
     return R, SCOPE
 

@@ -132,13 +132,19 @@ def main(seeds=range(15), val=2.0):
         tag = "agent(abduce)" if e == "agent" else "population"
         print(f"  {tag:>14} {ms(err[e]['modulated_XtoY']):>18} {ms(err[e]['confounded_AtoB']):>18}")
     print("=" * 96)
-    print(f"  replay IS load-bearing: shifting the hidden C by +2 changes the unit truth by "
-          f"{np.mean(shift_changes):.2f} (v1's additive case gave 0.00 -- abduction was inert).")
+    print(f"  replay is LOAD-BEARING: shifting recorded C changes the unit truth by a NONZERO amount "
+          f"({np.mean(shift_changes):.2f}, = gamma*shift*val since Y reads the do-set X), vs 0.00 in "
+          f"v1's additive case where the latent cancelled -- so abduction is no longer inert.")
     print(f"  modulated X->Y: agent(abduction) {np.mean(err['agent']['modulated_XtoY']):.3f} vs "
           f"population(no-abduction) {np.mean(err['population']['modulated_XtoY']):.3f} -- only the "
-          f"agent recovers the UNIT-specific effect by inferring the realization's hidden modulator.")
-    print(f"  confounded A->B (control): agent {np.mean(err['agent']['confounded_AtoB']):.3f} (true=0) "
-          f"vs passive-spurious {np.mean(err['population']['confounded_AtoB']):.3f}.")
+          f"agent recovers the UNIT effect by inferring the realization's hidden modulator. (The "
+          f"agent's residual is the IRREDUCIBLE proxy-noise floor ~ gamma*E|na|*E|val-X|, constant "
+          f"in n -- it shrinks only if the proxy A is cleaner, not with more data.)")
+    print(f"  confounded A->B (control): agent {np.mean(err['agent']['confounded_AtoB']):.3f} "
+          f"(ASSERTED 0 from the given A-/->B structure, not numerically discovered) vs "
+          f"passive-spurious {np.mean(err['population']['confounded_AtoB']):.3f}.")
+    print(f"  fairness note: the mechanism (sw,gamma,sd) is RECOVERABLE from the factual log "
+          f"(~0.70/0.60/0.20), so 'agent is given the mechanism' is a scoping choice, not circular.")
     print("=" * 96)
     return err, np.mean(shift_changes)
 

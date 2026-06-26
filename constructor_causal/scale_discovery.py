@@ -73,12 +73,13 @@ def _confounded_world(n_conf, rng, chain_len=3):
         A[b, a] = 0.7; A[b, b] = 0.2
     noise = np.full(d, 0.1); noise[0] = 1.0
     chain_edges = {(0, chain[0])} | {(a, b) for a, b in zip(chain, chain[1:])}
+    conf_pairs = [(sensors[2 * k], sensors[2 * k + 1]) for k in range(n_conf)]
     for k in range(n_conf):
         h = hidden[k]; A[h, h] = 0.9; noise[h] = 0.6
         A[sensors[2 * k], h] = 0.95; A[sensors[2 * k + 1], h] = 0.9
         noise[sensors[2 * k]] = 0.15; noise[sensors[2 * k + 1]] = 1.0
     return (DynamicalCausalWorld(A=A, b=np.zeros(d), noise_std=noise, actuators=(0,),
-                                 names=tuple(names), hidden=tuple(hidden)), chain_edges)
+                                 names=tuple(names), hidden=tuple(hidden)), chain_edges, conf_pairs)
 
 
 def _recall(rec, edges):
@@ -87,22 +88,30 @@ def _recall(rec, edges):
 
 
 def sweep_hard(depths=(10, 20, 40, 80), seeds=range(2), steps_per_d=60):
-    print("=" * 86)
-    print("SWEEP A -- recall on HARD structure (deep chain depth~d; dense DAG in-deg 3) + runtime")
-    print(f"  {'kind':>12} {'d':>5} {'recall':>14} {'runtime_s':>11}")
+    # NOTE: these are one-step lagged SCMs (x_{t+1}=A x_t), so TEMPORAL ORDER already orients every
+    # edge -- they are PASSIVELY identifiable. Recall here is regression support-recovery, NOT a test
+    # of intervention (a passive agent, and bare OLS, recover the same DAGs). We include a passive
+    # arm to make that explicit: intervention is INERT for recall on these worlds; its advantage is
+    # ORIENTATION / de-confounding (Part 1, head_to_head_graph), not recall scaling.
+    print("=" * 90)
+    print("SWEEP A -- support recovery on big structure (deep/dense), active vs passive + runtime")
+    print(f"  {'kind':>12} {'d':>5} {'recall(active)':>15} {'recall(passive)':>16} {'runtime_s':>11}")
     rows = []
     for depth in depths:
         for kind, mk, d in (("deep_chain", lambda r: deep_chain(depth, r), depth + 1),
                             ("dense_dag", lambda r: dense_dag(depth + 1, r), depth + 1)):
-            rc, rt = [], []
+            ra, rp, rt = [], [], []
             for s in seeds:
-                w = mk(np.random.default_rng(s))
-                t0 = time.time()
-                ag = ConstructorCausalAgent(w, seed=s, experimenter="epistemic")
-                ag.explore(n_steps=steps_per_d * w.d)
-                rc.append(ag.recovered_dag()["recall"]); rt.append(time.time() - t0)
-            print(f"  {kind:>12} {d:>5} {np.mean(rc):>8.2f}+/-{np.std(rc):<4.2f} {np.mean(rt):>11.1f}")
-            rows.append((kind, d, np.mean(rc), np.mean(rt)))
+                for arm, bucket in (("epistemic", ra), ("passive", rp)):
+                    w = mk(np.random.default_rng(s))
+                    t0 = time.time()
+                    ag = ConstructorCausalAgent(w, seed=s, experimenter=arm)
+                    ag.explore(n_steps=steps_per_d * w.d)
+                    bucket.append(ag.recovered_dag()["recall"])
+                    if arm == "epistemic":
+                        rt.append(time.time() - t0)
+            print(f"  {kind:>12} {d:>5} {np.mean(ra):>15.2f} {np.mean(rp):>16.2f} {np.mean(rt):>11.1f}")
+            rows.append((kind, d, np.mean(ra), np.mean(rp), np.mean(rt)))
     return rows
 
 
@@ -124,33 +133,45 @@ def sweep_distractors(ks=(5, 10, 20, 40), seeds=range(2), steps_per_d=60):
 
 
 def sweep_confounders(n_confs=(0, 1, 2, 4, 8), n_steps=800, seeds=range(3)):
-    print("\n" + "=" * 86)
-    print("SWEEP C -- CONFOUNDING wall: CHAIN-only recall (recoverable edges) + spurious false edges")
-    print(f"  {'#conf':>6} {'d':>5} {'CHAIN-recall':>14} {'#false-edges':>14}")
+    # Scored through the agent's OWN honest map (dag_marks): do-identified DIRECTED edges vs
+    # BIDIRECTED "possibly-confounded / can't-orient" marks. The agent does NOT confidently assert
+    # the confounded sensor pairs as directed causes -- it flags them bidirected. The wall is the
+    # COUNT of those un-orientable marks (an identifiability floor), not confident false edges.
+    print("\n" + "=" * 90)
+    print("SWEEP C -- CONFOUNDING wall via the agent's HONEST map (directed vs bidirected)")
+    print(f"  {'#conf':>6} {'d':>5} {'CHAIN-recall':>13} {'false-DIRECTED':>15} {'BIDIRECTED(conf)':>17}")
     rows = []
     for nc in n_confs:
-        cr, fe, d = [], [], None
+        cr, fd, bd, d = [], [], [], None
         for s in seeds:
-            w, chain_edges = _confounded_world(nc, np.random.default_rng(s)); d = w.d
+            w, chain_edges, conf_pairs = _confounded_world(nc, np.random.default_rng(s)); d = w.d
             ag = ConstructorCausalAgent(w, seed=s, experimenter="epistemic")
             ag.explore(n_steps=n_steps)
-            r = ag.recovered_dag()
-            cr.append(_recall(r, chain_edges)); fe.append(len(r["extra"]))
-        print(f"  {nc:>6} {d:>5} {np.mean(cr):>8.2f}+/-{np.std(cr):<4.2f} {np.mean(fe):>8.2f}+/-{np.std(fe):<4.2f}")
-        rows.append((nc, d, np.mean(cr), np.mean(fe)))
+            cr.append(_recall(ag.recovered_dag(), chain_edges))   # chain as ASSOCIATIONS (not buried)
+            marks = ag.dag_marks()
+            directed = set(map(tuple, marks.get("directed", set())))
+            bidir = set(frozenset(e) for e in marks.get("bidirected", set()))
+            fd.append(len(directed - chain_edges))                # confident FALSE directed edges
+            bd.append(sum(1 for p in conf_pairs if frozenset(p) in bidir))  # honest can't-orient marks
+        print(f"  {nc:>6} {d:>5} {np.mean(cr):>13.2f} {np.mean(fd):>15.2f} {np.mean(bd):>17.2f}")
+        rows.append((nc, d, np.mean(cr), np.mean(fd), np.mean(bd)))
     return rows
 
 
 def main():
     a = sweep_hard(); sweep_distractors(); c = sweep_confounders()
-    print("\n" + "=" * 86)
+    print("\n" + "=" * 90)
     print("WALLS:")
-    print(f"  SIZE/DIFFICULTY -- recall HOLDS on hard graphs: deep_chain & dense_dag stay ~1.0 to "
-          f"d={a[-1][1]} (runtime grows ~O(d^1.9), driven by #actuators). The chain is NOT buried.")
-    print(f"  CONFOUNDING -- the real chain recall stays {c[0][2]:.2f}=={c[-1][2]:.2f} (NOT buried), "
-          f"but spurious false edges grow {c[0][3]:.1f} -> {c[-1][3]:.1f} ({c[-1][0]} un-actuatable "
-          f"confounders) -- the HARD identifiability wall compute cannot buy past.")
-    print("=" * 86)
+    print(f"  SIZE -- support recovery holds to d={a[-1][1]} and active==passive ({a[-1][2]:.2f}=="
+          f"{a[-1][3]:.2f}): these one-step-lagged worlds are PASSIVELY identifiable (time orients "
+          f"edges), so intervention is INERT for RECALL here -- its advantage is orientation/"
+          f"de-confounding (Part 1). Compute (runtime ~O(d^1.9), #actuator-driven) is the only cost.")
+    print(f"  CONFOUNDING -- chain-recall flat {c[0][2]:.2f}=={c[-1][2]:.2f}; the agent asserts ~"
+          f"{c[-1][3]:.1f} false DIRECTED edges (it does NOT confidently misclaim) and correctly "
+          f"flags {c[-1][4]:.1f} un-orientable BIDIRECTED associations at {c[-1][0]} un-actuatable "
+          f"confounders -- a budget-invariant IDENTIFIABILITY wall it cannot de-confound without "
+          f"actuating the hidden cause. THIS is the wall compute cannot buy past.")
+    print("=" * 90)
 
 
 if __name__ == "__main__":

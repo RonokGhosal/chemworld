@@ -6,12 +6,21 @@ chain with no intervention. But ANM assumes CAUSAL SUFFICIENCY (no hidden confou
 assumption -- a hidden H nonlinearly drives a pair (p,q) with NO edge between them -- and asks whether
 intervention's necessity returns in the nonlinear regime.
 
-A pre-check settled the genuinely open question first: a SOPHISTICATED ANM can in principle reject
-BOTH directions when neither residual is independent (flagging confounding). We measured whether it
-does: on the nonlinearly-confounded pair the min-residual HSIC (~0.0011) is INDISTINGUISHABLE from a
-true edge's (~0.0007) and barely above the independent baseline (~0.0009) -- so even a confounding-
-aware ANM with a generous 5x-baseline threshold flags it 0/30. ANM is FOOLED: it sees an admissible
-direction and draws a spurious CAUSAL edge. So observation fails on nonlinear confounding too.
+A pre-check settled the genuinely open question first: a SOPHISTICATED observational method can in
+principle reject BOTH directions when neither residual is independent (flagging confounding). We
+measured whether it does: on the nonlinearly-confounded pair the min-residual HSIC (~0.0011) is
+INDISTINGUISHABLE from a true edge's (~0.0007) and barely above the independent baseline (~0.0009) --
+so even a confounding-aware ANM with a generous 5x-baseline threshold flags it 0/30. ANM does NOT
+mislabel the pair as INDEPENDENT (it correctly sees the dependence, obs corr ~0.86); its error is
+assigning a causal DIRECTION to a confounded dependence.
+
+Crucially this is NOT just our heuristic's weakness. An independent review ran a full latent-aware
+method -- FCI with the nonlinear KCI test (causal-learn) -- on this exact world: it leaves (p,q) as a
+circle-circle (o-o) mark, NOT bidirected, every seed. The reason is a genuine identifiability fact: an
+ISOLATED confounded pair (no observed collider or discriminating-path context linking it to the chain)
+is Markov-equivalent to {p->q, q->p, p<->q}, so the bidirected mark is non-identifiable from
+observation. (If the pair were embedded with an observed collider, FCI COULD orient it and this claim
+would need qualification -- so the regime here is deliberately isolated latent confounding.)
 
 World: nonlinear additive chain a->b->c (where ANM wins, 6A) + a pair (p,q) driven by hidden H,
 NO p->q edge. Methods:
@@ -116,17 +125,18 @@ def main(seeds=range(15), n_obs=4000, link="quad"):
     print(f"  {'do (interv)':>14} {m('do_chain'):>13.2f} {m('do_conf_edge'):>28.2f} {'n/a':>19}")
     print("=" * 98)
     print(f"  NECESSITY RETURNS: under nonlinearity ANM orients the real chain ({m('anm_chain'):.2f}, "
-          f"as in 6A) but is")
-    print(f"  FOOLED by the hidden confounder -- it draws a spurious causal edge on (p,q) "
+          f"as in 6A) but it")
+    print(f"  correctly sees (p,q) are DEPENDENT yet assigns a spurious causal DIRECTION "
           f"({m('anm_conf_edge'):.2f}) and")
-    print(f"  CANNOT flag the confounding ({m('anm_conf_flag'):.2f}), even with a confounding-aware "
-          f"reject-both test.")
+    print(f"  CANNOT flag the confounding ({m('anm_conf_flag'):.2f}) -- and neither can full FCI/KCI")
+    print(f"  (verified externally: isolated confounding -> bidirected mark is non-identifiable).")
     print(f"  do() orients the chain ({m('do_chain'):.2f}) and finds NO p->q edge ({m('do_conf_edge'):.2f}): "
           f"do(p) does not move q.")
     print(f"  So intervention's DE-CONFOUNDING necessity is robust to nonlinearity -- nonlinearity buys")
     print(f"  observation orientation of REAL edges (6A) but NOT immunity to hidden confounding.")
-    print(f"  SCOPE: actuatable confounder (do(p) allowed). An UN-actuatable hidden confounder is a hard")
-    print(f"  identifiability wall for BOTH methods (Rungs 1/5); nonlinearity does not change that.")
+    print(f"  SCOPE: isolated, ACTUATABLE confounder (do(p) allowed; pair has no observed collider, so")
+    print(f"  FCI cannot orient it either). An UN-actuatable hidden confounder is a hard identifiability")
+    print(f"  wall for BOTH methods (Rungs 1/5); nonlinearity does not change that.")
     print("=" * 98)
     return R
 

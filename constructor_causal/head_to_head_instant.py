@@ -1,21 +1,26 @@
 """
 RUNG 5 -- where intervention is NECESSARY, not just better: INSTANTANEOUS (contemporaneous) causal
-structure with hidden confounding.
+structure with hidden confounding -- and the HONEST scope of that "necessary".
 
 Parts 1-4 used one-step-lagged worlds (x_{t+1}=A x_t), so TIME orients every edge and observation
 alone recovers structure -- the reviews rightly noted intervention was never strictly required. Here
 the structure is INSTANTANEOUS: within one experiment a linear system x = B x + e settles, with a
-hidden confounder adding correlated noise to a pair. The world has three motifs:
-  * CHAIN     a -> b -> c : no collider, so OBSERVATION cannot orient it -- a->b->c, a<-b->c, a<-b<-c
-              are Markov-equivalent (a fundamental theorem, not a weak baseline).
-  * COLLIDER  d -> e <- f : OBSERVATION *can* orient this (the v-structure rule) -- included so the
-              passive baseline is demonstrably COMPETENT, not a strawman.
-  * CONFOUND  (p,q) via hidden H : OBSERVATION draws a p-q edge it cannot tell from a real one.
+hidden confounder adding correlated noise to a pair. Three motifs (d=8, labels permuted to hide order):
+  * CHAIN     a -> b -> c : no collider, so a->b->c, a<-b->c, a<-b<-c are Markov-equivalent.
+  * COLLIDER  d -> e <- f : a v-structure OBSERVATION can orient (so passive is demonstrably COMPETENT).
+  * CONFOUND  (p,q) via hidden H : observation draws a p-q edge it cannot tell from a real one.
 
 PASSIVE is a real constraint-based learner (PC: partial-correlation skeleton + v-structure
-orientation). ACTIVE intervenes: do(i=+/-delta), measure each j. We MEASURE (not assert) that passive
-orients the collider but NOT the chain, and keeps the confounded pair; active orients everything and
-drops the confounded pair. This is the regime where intervention is necessary.
+orientation). ACTIVE intervenes: do(i=+/-delta), measure each j, then TRANSITIVE-REDUCE to the direct
+DAG (do() recovers the transitive *closure*: do(a) moves c through b, so the raw rule emits a->c --
+we remove it so ACTIVE is graded on direct-edge recovery, the same footing as PASSIVE). Both methods
+get the SAME sample budget and BOTH report skeleton F1.
+
+SCOPE (the honest caveat): "observation cannot orient the chain" is a theorem for LINEAR-GAUSSIAN
+noise. Under linear NON-Gaussian noise, a LiNGAM/ICA measure orients the chain from observation alone.
+We demonstrate this directly. So intervention is the DISTRIBUTION-ROBUST route to orientation -- it
+works whatever the noise -- and it is strictly *necessary* only under Gaussianity (or if one restricts
+to CI-based methods). That is the precise, defensible claim.
 """
 from __future__ import annotations
 
@@ -27,10 +32,10 @@ import numpy as np
 class InstantWorld:
     """x = B x + e settled in topological order; a hidden confounder adds correlated noise to a pair.
     B[i,j] = instantaneous effect of j on i. Variable LABELS are permuted so the topological order is
-    hidden (no method may exploit index order)."""
+    hidden. noise_dist in {'gaussian','laplace'} (laplace = linear non-Gaussian, for the scope arm)."""
 
-    def __init__(self, edges, conf_pairs, d, rng, w=0.8, noise=1.0, conf_str=1.2):
-        self.d = d; self.rng = rng; self.noise = noise
+    def __init__(self, edges, conf_pairs, d, rng, w=0.8, noise=1.0, conf_str=1.2, noise_dist="gaussian"):
+        self.d = d; self.rng = rng; self.noise = noise; self.noise_dist = noise_dist
         perm = rng.permutation(d)
         self.lab = {i: int(perm[i]) for i in range(d)}        # internal i -> observed label
         self.B = np.zeros((d, d))
@@ -43,10 +48,15 @@ class InstantWorld:
         self.conf_str = conf_str
         self.true_conf = set(frozenset((self.lab[a], self.lab[b])) for (a, b) in conf_pairs)
 
+    def _noise(self, size):
+        if self.noise_dist == "laplace":
+            return self.rng.laplace(0.0, self.noise / np.sqrt(2.0), size)   # var = noise^2
+        return self.rng.normal(0.0, self.noise, size)
+
     def sample(self, do=None):
-        e = self.rng.normal(0, self.noise, self.d)
+        e = self._noise(self.d)
         for (a, b) in self.conf:
-            h = self.rng.normal() * self.conf_str
+            h = float(self._noise(1)[0]) * self.conf_str
             e[a] += h; e[b] += h
         x = np.zeros(self.d)
         do_i = do or {}
@@ -74,8 +84,7 @@ def _pcorr(C, i, j, S):
 
 
 def pc_skeleton(X, alpha=0.06, max_S=3):
-    """PC skeleton: drop i-j if some conditioning set S (|S|<=max_S) makes partial corr < alpha.
-    Records the separating set. Returns (edges:set[frozenset], sepset:dict)."""
+    """PC skeleton: drop i-j if some conditioning set S (|S|<=max_S) makes partial corr < alpha."""
     d = X.shape[1]; C = np.corrcoef(X.T)
     adj = {i: set(range(d)) - {i} for i in range(d)}
     sepset = {}
@@ -95,33 +104,62 @@ def pc_skeleton(X, alpha=0.06, max_S=3):
 
 
 def pc_orient(edges, sepset, adj, d):
-    """Orient unshielded colliders i->k<-j (k not in sepset(i,j)). Returns directed set."""
+    """Orient unshielded colliders i->k<-j (k not in sepset(i,j))."""
     directed = set()
     for k in range(d):
-        nb = sorted(adj[k])
-        for a, b in combinations(nb, 2):
-            if frozenset((a, b)) not in edges:               # unshielded triple a-k-b
-                if k not in sepset.get(frozenset((a, b)), set()):
-                    directed.add((a, k)); directed.add((b, k))
+        for a, b in combinations(sorted(adj[k]), 2):
+            if frozenset((a, b)) not in edges and k not in sepset.get(frozenset((a, b)), set()):
+                directed.add((a, k)); directed.add((b, k))
     return directed
 
 
+# ----------------------------- LiNGAM: orient under NON-Gaussianity (scope arm) -----------------------------
+def lingam_dir(x, y):
+    """Hyvarinen-Smith pairwise measure: +1 => x->y. ~0 (chance) for Gaussian; identifies for
+    super-Gaussian/skewed noise. (CI-based PC ignores this higher-order info.)"""
+    x = (x - x.mean()) / (x.std() + 1e-9); y = (y - y.mean()) / (y.std() + 1e-9)
+    rho = float(np.mean(x * y))
+    M = rho * (np.mean(x * np.tanh(y)) - np.mean(np.tanh(x) * y))
+    return 1 if M > 0 else -1
+
+
 # ----------------------------- ACTIVE: interventional -----------------------------
-def active_discover(world, n=400, delta=2.0, thresh=0.15):
+def active_discover(world, n=300, delta=2.0, thresh=0.15):
     d = world.d
     eff = np.zeros((d, d))
     for i in range(d):
         xp = world.collect(n, do={i: delta}).mean(0)
         xm = world.collect(n, do={i: -delta}).mean(0)
         eff[:, i] = (xp - xm) / (2 * delta)                  # eff[j,i] = effect of do(i) on j
-    directed = set()
+    raw = set()
     for i in range(d):
         for j in range(d):
             if i != j and abs(eff[j, i]) > thresh and abs(eff[i, j]) <= thresh:
-                directed.add((i, j))                          # i moves j, j doesn't move i
-    return directed, eff
+                raw.add((i, j))                               # i moves j, j doesn't move i (ancestral)
+    return transitive_reduce(raw, d), eff                     # -> DIRECT DAG (drop a->c etc.)
 
 
+def transitive_reduce(directed, d):
+    """Remove i->j when a longer directed path i->...->k->...->j exists (do() yields the transitive
+    closure; we recover the direct edges)."""
+    reach = {i: set() for i in range(d)}
+    for (i, j) in directed:
+        reach[i].add(j)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(d):
+            add = set().union(*[reach[j] for j in reach[i]]) if reach[i] else set()
+            if not add <= reach[i]:
+                reach[i] |= add; changed = True
+    reduced = set()
+    for (i, j) in directed:
+        if not any(k != i and k != j and k in reach[i] and j in reach[k] for k in range(d)):
+            reduced.add((i, j))
+    return reduced
+
+
+# ----------------------------- scoring -----------------------------
 def _orient_frac(directed, true_dir):
     if not true_dir:
         return 1.0, 0.0
@@ -130,60 +168,88 @@ def _orient_frac(directed, true_dir):
     return correct / len(true_dir), rev / len(true_dir)
 
 
-def main(seeds=range(15), n=500, n_obs=4000):
-    print("=" * 96)
-    print(f"RUNG 5 -- INSTANTANEOUS structure + hidden confounding: observe (PC) vs intervene "
+def _skel_f1(edge_set, true_skel):
+    skel = set(frozenset(e) for e in edge_set)
+    tp = len(skel & true_skel); fp = len(skel - true_skel); fn = len(true_skel - skel)
+    return tp / (tp + 0.5 * (fp + fn)) if tp else 0.0
+
+
+def main(seeds=range(15), n_active=300):
+    print("=" * 98)
+    print(f"RUNG 5 -- INSTANTANEOUS structure + hidden confounding: observe (PC) vs intervene (do) "
           f"({len(list(seeds))} seeds)")
-    print("=" * 96)
-    # internal: chain 0->1->2 ; collider 3->5, 4->5 ; confounded pair (6,7) via hidden H. d=8.
-    edges = [(0, 1), (1, 2), (3, 5), (4, 5)]
-    confs = [(6, 7)]
-    CH = lambda w: {(w.lab[0], w.lab[1]), (w.lab[1], w.lab[2])}       # chain true edges (labels)
-    CO = lambda w: {(w.lab[3], w.lab[5]), (w.lab[4], w.lab[5])}       # collider true edges (labels)
-    R = {k: [] for k in ("p_chain", "p_coll", "p_conf", "p_skelF1",
-                          "a_chain", "a_coll", "a_conf", "a_chain_rev")}
+    print("=" * 98)
+    edges = [(0, 1), (1, 2), (3, 5), (4, 5)]                  # chain 0->1->2 ; collider 3->5,4->5
+    confs = [(6, 7)]                                          # confounded pair via hidden H ; d=8
+    d = 8
+    n_obs = d * 2 * n_active                                  # SAMPLE-FAIR: passive gets active's budget
+    CH = lambda w: {(w.lab[0], w.lab[1]), (w.lab[1], w.lab[2])}
+    CO = lambda w: {(w.lab[3], w.lab[5]), (w.lab[4], w.lab[5])}
+    R = {k: [] for k in ("p_chain", "p_coll", "p_conf", "p_f1",
+                          "a_chain", "a_rev", "a_coll", "a_conf", "a_f1", "a_extra")}
+    SCOPE = {"g_pc": [], "g_lin": [], "g_do": [], "l_pc": [], "l_lin": [], "l_do": []}
     for s in seeds:
-        rng = np.random.default_rng(s)
-        w = InstantWorld(edges, confs, d=8, rng=rng)
+        w = InstantWorld(edges, confs, d=d, rng=np.random.default_rng(s))
         chain, coll = CH(w), CO(w)
-        true_skel = set(frozenset(e) for e in (w.true_dir | {frozenset(p) for p in []})) \
-            | set(frozenset(e) for e in w.true_dir) | w.true_conf
-        # PASSIVE (PC)
+        true_skel = set(frozenset(e) for e in w.true_dir)    # 4 DIRECT edges; confounded p-q is NOT one
+        # PASSIVE (PC) -- sample-fair
         X = w.collect(n_obs)
         edges_p, sep, adj = pc_skeleton(X)
-        dir_p = pc_orient(edges_p, sep, adj, w.d)
+        dir_p = pc_orient(edges_p, sep, adj, d)
         R["p_chain"].append(_orient_frac(dir_p, chain)[0])
         R["p_coll"].append(_orient_frac(dir_p, coll)[0])
         R["p_conf"].append(1.0 if any(fs in edges_p for fs in w.true_conf) else 0.0)
-        tp = len(edges_p & true_skel); fp = len(edges_p - true_skel); fn = len(true_skel - edges_p)
-        R["p_skelF1"].append(tp / (tp + 0.5 * (fp + fn)) if tp else 0.0)
-        # ACTIVE
-        dir_a, eff = active_discover(w, n=n)
+        R["p_f1"].append(_skel_f1(edges_p, true_skel))       # p-q counts as a FALSE positive
+        # ACTIVE (do) -- transitive-reduced to direct DAG, graded the SAME way
+        dir_a, eff = active_discover(w, n=n_active)
         cf, rev = _orient_frac(dir_a, chain)
-        R["a_chain"].append(cf); R["a_chain_rev"].append(rev)
+        R["a_chain"].append(cf); R["a_rev"].append(rev)
         R["a_coll"].append(_orient_frac(dir_a, coll)[0])
         R["a_conf"].append(1.0 if any((a, b) in dir_a or (b, a) in dir_a
                                        for fs in w.true_conf for (a, b) in [tuple(fs)]) else 0.0)
+        R["a_f1"].append(_skel_f1(dir_a, true_skel))
+        R["a_extra"].append(len(dir_a - w.true_dir))         # transitive/spurious extras (should be ~0)
+        # SCOPE arm: chain orientation by PC vs LiNGAM vs do, under gaussian vs laplace noise
+        for tag, dist in (("g", "gaussian"), ("l", "laplace")):
+            wd = InstantWorld(edges, confs, d=d, rng=np.random.default_rng(1000 + s), noise_dist=dist)
+            Xd = wd.collect(n_obs)
+            ep, spd, adp = pc_skeleton(Xd)
+            SCOPE[f"{tag}_pc"].append(_orient_frac(pc_orient(ep, spd, adp, d), CH(wd))[0])
+            lin = np.mean([1.0 if lingam_dir(Xd[:, wd.lab[a]], Xd[:, wd.lab[b]]) == 1 else 0.0
+                           for (a, b) in [(0, 1), (1, 2)]])
+            SCOPE[f"{tag}_lin"].append(lin)
+            da, _ = active_discover(wd, n=n_active)
+            SCOPE[f"{tag}_do"].append(_orient_frac(da, CH(wd))[0])
         print(f"  seed {s} done")
 
-    def m(k):
-        return float(np.mean(R[k]))
-    print(f"\n  {'motif':>24} {'PASSIVE (PC)':>14} {'ACTIVE (do)':>13}")
-    print(f"  {'CHAIN a->b->c orient':>24} {m('p_chain'):>14.2f} {m('a_chain'):>13.2f}")
-    print(f"  {'COLLIDER d->e<-f orient':>24} {m('p_coll'):>14.2f} {m('a_coll'):>13.2f}")
-    print(f"  {'CONFOUND p-q kept/drawn':>24} {m('p_conf'):>14.2f} {m('a_conf'):>13.2f}")
-    print(f"  {'skeleton F1 (passive)':>24} {m('p_skelF1'):>14.2f} {'--':>13}")
-    print("=" * 96)
-    print(f"  FAIR baseline: passive (PC) is COMPETENT -- it orients the COLLIDER ({m('p_coll'):.2f}, a")
-    print(f"  v-structure observation CAN identify) and recovers a clean skeleton (F1 {m('p_skelF1'):.2f}).")
-    print(f"  But it CANNOT orient the CHAIN ({m('p_chain'):.2f}) -- a<-b<-c / a->b->c / a<-b->c are")
-    print(f"  Markov-equivalent -- and keeps the confounded pair as an edge ({m('p_conf'):.2f}).")
-    print(f"  ACTIVE orients the chain ({m('a_chain'):.2f}, reversed {m('a_chain_rev'):.2f}) AND the")
-    print(f"  collider ({m('a_coll'):.2f}), and does NOT draw the confounded pair ({m('a_conf'):.2f}).")
-    print(f"  This is the regime where intervention is NECESSARY: with no temporal order, observation is")
-    print(f"  stuck at the Markov-equivalence class; only acting resolves direction and confounding.")
-    print("=" * 96)
-    return R
+    def m(k, src=R):
+        return float(np.mean(src[k]))
+    print(f"\n  {'motif':>26} {'PASSIVE (PC)':>14} {'ACTIVE (do)':>13}   [both sample-fair: {n_obs} draws]")
+    print(f"  {'CHAIN a->b->c orient':>26} {m('p_chain'):>14.2f} {m('a_chain'):>13.2f}")
+    print(f"  {'COLLIDER d->e<-f orient':>26} {m('p_coll'):>14.2f} {m('a_coll'):>13.2f}")
+    print(f"  {'CONFOUND p-q drawn as edge':>26} {m('p_conf'):>14.2f} {m('a_conf'):>13.2f}")
+    print(f"  {'skeleton F1 (direct edges)':>26} {m('p_f1'):>14.2f} {m('a_f1'):>13.2f}")
+    print("=" * 98)
+    print(f"  Graded the SAME way: ACTIVE is transitive-reduced (extras {m('a_extra'):.2f}/seed) so a->c")
+    print(f"  is dropped; PASSIVE (PC) is COMPETENT -- orients the COLLIDER ({m('p_coll'):.2f}) -- but")
+    print(f"  CANNOT orient the CHAIN ({m('p_chain'):.2f}; Markov-equivalent) and is forced to draw the")
+    print(f"  confounded pair ({m('p_conf'):.2f}), costing it skeleton F1 ({m('p_f1'):.2f} vs ACTIVE")
+    print(f"  {m('a_f1'):.2f}). ACTIVE orients the chain ({m('a_chain'):.2f}, reversed {m('a_rev'):.2f})")
+    print(f"  and drops the confounder ({m('a_conf'):.2f}).")
+    print("-" * 98)
+    print(f"  SCOPE -- is intervention NECESSARY, or only for CI-based methods under Gaussianity?")
+    print(f"  {'noise':>10} {'PC-chain':>10} {'LiNGAM-chain':>14} {'do-chain':>10}")
+    print(f"  {'gaussian':>10} {m('g_pc',SCOPE):>10.2f} {m('g_lin',SCOPE):>14.2f} {m('g_do',SCOPE):>10.2f}")
+    print(f"  {'laplace':>10} {m('l_pc',SCOPE):>10.2f} {m('l_lin',SCOPE):>14.2f} {m('l_do',SCOPE):>10.2f}")
+    print("=" * 98)
+    print(f"  HONEST SCOPE: under linear NON-Gaussian (laplace) noise OBSERVATION can orient the chain")
+    print(f"  (LiNGAM {m('l_lin',SCOPE):.2f}, exploiting non-Gaussianity PC ignores); under GAUSSIAN noise")
+    print(f"  it provably cannot (LiNGAM {m('g_lin',SCOPE):.2f} ~ chance). do() orients REGARDLESS")
+    print(f"  (gaussian {m('g_do',SCOPE):.2f}, laplace {m('l_do',SCOPE):.2f}). So intervention is the")
+    print(f"  DISTRIBUTION-ROBUST route to orientation, and strictly *necessary* only under Gaussianity")
+    print(f"  (or if one restricts to CI-based discovery). That is the precise claim.")
+    print("=" * 98)
+    return R, SCOPE
 
 
 if __name__ == "__main__":

@@ -225,14 +225,19 @@ def main(seeds=range(15), n_seq=400, T=16, with_transformer=True):
     for e in ests:
         print(f"    {e:>14}: {ms(real_detect[e])}")
     print("=" * 92)
-    # headline: predictor confounded error vs its own no-path floor; agent stays at floor
-    for e in [x for x in ests if x != "agent"]:
-        cf, fl = np.mean(err[e]["confounded"]), np.mean(err[e]["no-path"])
-        af = np.mean(err["agent"]["confounded"])
-        print(f"  {e}: confounded err {cf:.3f} vs no-path floor {fl:.3f}  "
-              f"(confounding signal {cf-fl:+.3f});  agent confounded err {af:.3f} ~ floor")
-    print("  -> the passive predictor's error JUMPS on confounded pairs (above its no-path noise")
-    print("     floor); the active agent's does NOT -- it is not fooled, with NO access to C.")
+    # headline: per-SEED PAIRED comparison (pooled +/- bands across seeds x pairs overlap and
+    # mislead; the honest test is per-seed confounded-mean vs that seed's no-path floor-mean).
+    ns = len(list(seeds))
+    def per_seed(e, pt, k):                              # k pairs/seed: confounded 2, no-path 9
+        return np.array(err[e][pt], float).reshape(ns, k).mean(1)
+    for e in ests:
+        cf_s, fl_s = per_seed(e, "confounded", 2), per_seed(e, "no-path", 9)
+        d = cf_s - fl_s; sem = d.std() / np.sqrt(ns)
+        print(f"  {e:>12}: confounded CF-err {cf_s.mean():.3f} vs no-path floor {fl_s.mean():.3f}; "
+              f"confounded>floor in {int((cf_s > fl_s).sum())}/{ns} seeds, "
+              f"paired diff {d.mean():+.3f} +/- {sem:.3f}")
+    print("  -> passive predictors' error JUMPS above their no-path floor on confounded pairs in")
+    print("     (almost) every seed; the active agent's does NOT -- not fooled, with NO access to C.")
     print("=" * 92)
     return err, real_detect
 

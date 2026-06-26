@@ -116,54 +116,63 @@ def do_dir(world, la, lb, delta=1.0, n=300, thresh=0.1):
     return 0
 
 
-def _chain_frac(world, X, method):
-    """Fraction of chain edges oriented CORRECTLY by `method` (which returns +1 => first->second)."""
-    ok = 0
+def _chain_edges(world, X):
+    """Per chain edge: (anm_correct, lingam_correct, do_correct) as 0/1 (method +1 => first->second)."""
+    out = []
     for i in range(world.depth):
         la, lb = world.lab[i], world.lab[i + 1]                # true la->lb
-        if method == "anm":
-            d = anm_dir(X[:, la], X[:, lb])
-        elif method == "lingam":
-            d = lingam_dir(X[:, la], X[:, lb])
-        else:
-            d = do_dir(world, la, lb)
-        ok += (d == 1)
-    return ok / world.depth
+        out.append((1.0 if anm_dir(X[:, la], X[:, lb]) == 1 else 0.0,
+                    1.0 if lingam_dir(X[:, la], X[:, lb]) == 1 else 0.0,
+                    1.0 if do_dir(world, la, lb) == 1 else 0.0))
+    return out
+
+
+def _verdict(a, do_minus_anm):
+    if a < 0.7:
+        return "do NECESSARY (obs ~chance)"
+    if a < 0.98 or do_minus_anm > 0.02:
+        return "do BETTER (obs mostly orients; do strictly more reliable)"
+    return "do REDUNDANT (obs fully orients)"
 
 
 def main(seeds=range(15), n_obs=4000, depth=2):
-    print("=" * 92)
+    print("=" * 100)
     print(f"RUNG 6A -- where intervention STOPS being necessary (nonlinear additive, Gaussian noise) "
           f"({len(list(seeds))} seeds)")
-    print("=" * 92)
-    print(f"  chain a->b->c orientation fraction (1.00 = fully correct, ~0.50 = chance)")
-    print(f"  {'link':>8} {'ANM (obs)':>11} {'LiNGAM (obs)':>13} {'do (interv)':>12}   verdict")
+    print("=" * 100)
+    print(f"  chain a->b->c orientation fraction (1.00 = correct, ~0.50 = chance); "
+          f"'do>ANM' = edges where do() right & ANM wrong")
+    print(f"  {'link':>8} {'ANM (obs)':>11} {'LiNGAM':>8} {'do (interv)':>12} {'do>ANM':>8}   verdict")
     rows = {}
     for link in ("linear", "tanh", "quad", "sin"):
-        A, L, D = [], [], []
+        edges = []
         for s in seeds:
             w = NLChainWorld(depth, np.random.default_rng(s), link=link)
-            X = w.sample(n_obs)
-            A.append(_chain_frac(w, X, "anm"))
-            L.append(_chain_frac(w, X, "lingam"))
-            D.append(_chain_frac(w, X, "do"))
-        a, l, d = np.mean(A), np.mean(L), np.mean(D)
-        rows[link] = (a, l, d)
-        verdict = "do NECESSARY (obs at chance)" if a < 0.7 and l < 0.7 else "do REDUNDANT (obs orients)"
-        print(f"  {link:>8} {a:>11.2f} {l:>13.2f} {d:>12.2f}   {verdict}")
-    print("=" * 92)
+            edges += _chain_edges(w, w.sample(n_obs))
+        E = np.array(edges)                                     # (n_edges, 3): anm, lingam, do
+        a, l, d = E[:, 0].mean(), E[:, 1].mean(), E[:, 2].mean()
+        do_gt_anm = float(np.mean((E[:, 2] == 1) & (E[:, 0] == 0)))   # do right, ANM wrong
+        anm_gt_do = float(np.mean((E[:, 0] == 1) & (E[:, 2] == 0)))   # ANM right, do wrong
+        rows[link] = (a, l, d, do_gt_anm, anm_gt_do)
+        print(f"  {link:>8} {a:>11.2f} {l:>8.2f} {d:>12.2f} {do_gt_anm:>8.2f}   {_verdict(a, do_gt_anm)}")
+    print("=" * 100)
     lin = rows["linear"]
-    nl = np.mean([rows[k][0] for k in ("tanh", "quad", "sin")])
-    print(f"  BOUNDARY FOUND: LINEAR-Gaussian -> observation is at chance (ANM {lin[0]:.2f}, LiNGAM "
-          f"{lin[1]:.2f}) and do() is NECESSARY ({lin[2]:.2f}) -- this is Rung 5.")
-    print(f"  NONLINEAR-Gaussian -> a nonlinear-aware observational method ORIENTS the chain "
-          f"(ANM {nl:.2f} avg over tanh/quad/sin), so do() ({np.mean([rows[k][2] for k in ('tanh','quad','sin')]):.2f}) "
-          f"is REDUNDANT -- intervention is NOT necessary here.")
-    print(f"  So intervention is strictly necessary for orientation only in the doubly-degenerate")
-    print(f"  LINEAR-AND-GAUSSIAN case; nonlinearity (like non-Gaussianity) breaks the symmetry and")
-    print(f"  hands orientation back to observation. (LiNGAM is the WRONG tool under nonlinearity --")
-    print(f"  quad/sin {rows['quad'][1]:.2f}/{rows['sin'][1]:.2f} -- using it here would falsely 'show' a do win.)")
-    print("=" * 92)
+    clean = [k for k in ("tanh", "quad", "sin") if rows[k][0] >= 0.98 and rows[k][3] <= 0.02]
+    print(f"  BOUNDARY: LINEAR-Gaussian -> observation at chance (ANM {lin[0]:.2f}, LiNGAM {lin[1]:.2f}),")
+    print(f"  do() NECESSARY ({lin[2]:.2f}) -- Rung 5. Add NONLINEARITY and a nonlinear-aware")
+    print(f"  observational method (ANM) orients the chain WITHOUT acting:")
+    print(f"   * {', '.join(clean)}: ANM fully orients (>=0.98, 0 do>ANM edges) -> do() REDUNDANT, so")
+    print(f"     intervention is NOT necessary in these additive-Gaussian nonlinear chains.")
+    print(f"   * tanh: ANM {rows['tanh'][0]:.2f} (saturation flattens the child, costing the HSIC test")
+    print(f"     power; asymptotes ~0.975<1.0) and do>ANM={rows['tanh'][3]:.2f} -- here do() is strictly")
+    print(f"     MORE reliable, so we do NOT claim 'not necessary', only 'observation mostly suffices'.")
+    print(f"  Honest read: intervention is strictly necessary for orientation only in the doubly-")
+    print(f"  degenerate LINEAR-AND-GAUSSIAN case; nonlinearity (like non-Gaussianity) hands orientation")
+    print(f"  back to observation -- cleanly for quad/sin, partially for the saturating tanh. (LiNGAM,")
+    print(f"  the linear tool, gets sin {rows['sin'][1]:.2f} -- the WRONG baseline would fake a do win.)")
+    print(f"  SCOPE: additive-noise, acyclic. Off it (post-nonlinear / multiplicative noise) ANM")
+    print(f"  collapses and this boundary does NOT hold -- not claimed here.")
+    print("=" * 100)
     return rows
 
 

@@ -88,14 +88,24 @@ def collect_passive(world, n_seq=400, T=16):
             np.asarray(NXT, np.float32), np.asarray(CPREV, np.float32), np.asarray(SEQ, np.float32))
 
 
+# All four estimators measure the SAME estimand: the effect of HOLDING do(i:=val) for H steps on
+# j (vs holding do(i:=0)). Predictors roll their learned map forward H steps clamping i at EVERY
+# step (a real do, not a one-shot nudge) -- this lets a passive model propagate the real X->Y edge
+# (so the rematch is fair) while still propagating its confounded A->B hallucination.
+H_STEPS = 6
+
+
 # ---------- truth (oracle, uses hidden C) ----------
-def truth_effect(prev, cprev, i, j, val=DO_VAL):
-    """Ground-truth one-step interventional effect, averaged over the logged (C,obs) states."""
+def truth_effect(prev, cprev, i, j, val=DO_VAL, H=H_STEPS):
+    """Ground-truth H-step interventional effect, averaged over the logged (C,obs) states."""
     w = ConfoundedWorld(np.random.default_rng(12345))
     def avg(v):
         tot = 0.0
         for o0, c0 in zip(prev, cprev):
-            w.set_state(c0, o0); w.step(do={i: v}); tot += w.o[j]
+            w.set_state(c0, o0)
+            for _ in range(H):
+                w.step(do={i: v})
+            tot += w.o[j]
         return tot / len(prev)
     return avg(val) - avg(0.0)
 
@@ -107,34 +117,42 @@ def fit_ols(prev, act, nxt):
     return B                                                 # (9, 4)
 
 
-def ols_effect(B, prev, i, j, val=DO_VAL):
-    """Imagined one-step do(i:=val) on j: average predicted next-j with prev[i]=val vs 0."""
+def ols_effect(B, prev, i, j, val=DO_VAL, H=H_STEPS):
+    """Imagined do: roll the learned linear map forward H steps, re-clamping i:=val each step."""
     def pred(v):
-        P = prev.copy(); P[:, i] = v
-        X = np.concatenate([P, np.zeros((len(P), NOBS), np.float32), np.ones((len(P), 1), np.float32)], 1)
-        return (X @ B)[:, j].mean()
+        s = prev.copy().astype(np.float32); s[:, i] = v
+        for _ in range(H):
+            X = np.concatenate([s, np.zeros((len(s), NOBS), np.float32),
+                                np.ones((len(s), 1), np.float32)], 1)
+            s = (X @ B).astype(np.float32); s[:, i] = v
+        return s[:, j].mean()
     return float(pred(val) - pred(0.0))
 
 
-def transformer_effect(model, prev, i, j, val=DO_VAL):
-    """Clean ONE-STEP imagined do: feed length-1 windows (the predictor's own one-step map),
-    clamp i, read predicted next-j. (Length-1 removes the v1 history-inflation artifact.)"""
+def transformer_effect(model, prev, i, j, val=DO_VAL, H=H_STEPS):
+    """Imagined do via AUTOREGRESSIVE rollout: roll the transformer forward H steps, feeding its
+    own generated history and re-clamping i:=val each step (a fair multi-step do, not a length-1
+    one-shot). Lets the model propagate the real edge AND its confounded bias over the horizon."""
     dev = next(model.parameters()).device
     def pred(v):
-        S = torch.tensor(prev).clone()[:, None, :]           # (N,1,4)
-        S[:, 0, i] = v
-        Az = torch.zeros_like(S)
+        s = torch.tensor(prev).clone(); s[:, i] = v          # (N,4)
+        seq = s[:, None, :]                                  # (N,1,4)
         with torch.no_grad():
-            return float(model(S.to(dev), Az.to(dev))[:, -1, j].mean())
+            for _ in range(H):
+                az = torch.zeros_like(seq)
+                nxt = model(seq.to(dev), az.to(dev))[:, -1, :].cpu()   # (N,4) predicted next
+                nxt[:, i] = v
+                seq = torch.cat([seq, nxt[:, None, :]], 1)
+        return float(seq[:, -1, j].mean())
     return pred(val) - pred(0.0)
 
 
 # ---------- causal agent (active, NO C-access, finite budget) ----------
-def agent_effect(seed, i, j, val=DO_VAL, K=200, warmup=8):
+def agent_effect(seed, i, j, val=DO_VAL, K=200, warmup=8, H=H_STEPS):
     """Finite budget of INDEPENDENT real interventions. The agent reaches a natural state by its
-    OWN actions (the hidden C is whatever arises -- never observed or controlled), then does
-    do(i:=v). Each trial is an independent draw, so the estimate carries realistic finite-sample
-    noise (no matched-RNG cancellation). Its win comes purely from being able to ACT."""
+    OWN actions (the hidden C is whatever arises -- never observed or controlled), then HOLDS
+    do(i:=v) for H steps. Each trial is an independent draw -> realistic finite-sample noise. Its
+    win comes purely from being able to ACT."""
     base = np.random.default_rng(seed * 100003 + i * 11 + j)
     def branch(v):
         tot = 0.0
@@ -143,7 +161,8 @@ def agent_effect(seed, i, j, val=DO_VAL, K=200, warmup=8):
             w.reset()
             for _ in range(warmup):
                 w.step(action=w.rng.normal(0, 0.4, NOBS))    # natural state, hidden C, uncontrolled
-            w.step(do={i: v})
+            for _ in range(H):
+                w.step(do={i: v})
             tot += w.o[j]
         return tot / K
     return branch(val) - branch(0.0)
@@ -166,6 +185,7 @@ def main(seeds=range(15), n_seq=400, T=16, with_transformer=True):
     # err[estimator][ptype] = list of |estimate - truth| across seeds*pairs
     err = {e: {"confounded": [], "real": [], "no-path": []} for e in ("ols", "transformer", "agent")}
     real_detect = {e: [] for e in ("ols", "transformer", "agent")}    # signed estimate on X->Y
+    true_xy = []                                                       # true H-step X->Y effect
 
     for s in seeds:
         rng = np.random.default_rng(s)
@@ -186,6 +206,7 @@ def main(seeds=range(15), n_seq=400, T=16, with_transformer=True):
                 etf = transformer_effect(tm, PREV, i, j)
                 err["transformer"][pt].append(abs(etf - t))
             if (i, j) == (X_, Y_):
+                true_xy.append(t)
                 real_detect["ols"].append(eo); real_detect["agent"].append(ea)
                 if tm is not None:
                     real_detect["transformer"].append(etf)
@@ -200,7 +221,7 @@ def main(seeds=range(15), n_seq=400, T=16, with_transformer=True):
     print(f"  {'estimator':>14} {'CONFOUNDED':>16} {'no-path (floor)':>18} {'real-edge X->Y':>16}")
     for e in ests:
         print(f"  {e:>14} {ms(err[e]['confounded']):>16} {ms(err[e]['no-path']):>18} {ms(err[e]['real']):>16}")
-    print(f"\n  signed effect on the REAL edge X->Y (truth ~ {0.85*DO_VAL:.2f}):")
+    print(f"\n  signed effect on the REAL edge X->Y (true H-step ~ {np.mean(true_xy):.2f}):")
     for e in ests:
         print(f"    {e:>14}: {ms(real_detect[e])}")
     print("=" * 92)

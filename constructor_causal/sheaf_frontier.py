@@ -84,7 +84,7 @@ def gates_recovered(ens, world):
     return len(rec & true_targets), len(true_targets)
 
 
-def run(mode, gates, K, rounds, epochs, ep, seed):
+def run(mode, gates, K, rounds, epochs, ep, seed, confirm=False):
     rng = np.random.default_rng(seed)
     world, Z, names = multigate_world(gates, np.random.default_rng(seed))
     wf = lambda: multigate_world(gates, rng)[0]
@@ -104,7 +104,15 @@ def run(mode, gates, K, rounds, epochs, ep, seed):
             random_collect(wf, ens, n_episodes=ep, ep_len=6, rng=rng)
         ens.fit(epochs=epochs)
         lib = build_library(synth, max_rounds=gates + 1)
-    got, total = gates_recovered(ens, world)
+    # structure readout: OBSERVATIONAL (gate weights) OR INTERVENTIONAL confirmation (acting)
+    if confirm:
+        from .sheaf_confirm import recover_structure_interventional
+        hyper = recover_structure_interventional(ens, lib, synth, world.sensors, world.actuators)
+        true_t = {i for (i, a, b, w) in world.interactions}
+        rec = {i for H, i, _ in hyper if len(H) == 2}
+        got, total = len(rec & true_t), len(true_t)
+    else:
+        got, total = gates_recovered(ens, world)
     # does the library+planner compose a path to Z? Target the ACHIEVABLE high-|Z| region the library's
     # deepest skills actually reach (the world drives Z to ~+/-8, not an arbitrary small box).
     zskills = [(hi if abs(hi) > abs(lo) else lo)
@@ -132,11 +140,13 @@ def main():
     print(f"FRONTIER-DIRECTED exploration vs random baseline  device={DEVICE}")
     print(f"  {args.gates}-gate cascade (d={world.d}); recover gates + PLAN a path to Z")
     print("=" * 92)
-    print(f"  {'mode':>10} {'gates recovered':>17} {'reach(Z)':>10} {'rel':>6} {'#skills':>8}")
-    for mode in ("baseline", "frontier"):
+    print(f"  {'mode':>16} {'gates recovered':>17} {'reach(Z)':>10} {'rel':>6} {'#skills':>8}")
+    for label, mode, confirm in (("baseline", "baseline", False),
+                                 ("frontier", "frontier", False),
+                                 ("frontier+confirm", "frontier", True)):
         got, total, reached, rel, nlib = run(mode, args.gates, args.K, args.rounds,
-                                              args.epochs, args.ep, args.seed)
-        print(f"  {mode:>10} {got:>10} / {total:<4} {str(reached):>10} {rel:>6.2f} {nlib:>8}")
+                                              args.epochs, args.ep, args.seed, confirm=confirm)
+        print(f"  {label:>16} {got:>10} / {total:<4} {str(reached):>10} {rel:>6.2f} {nlib:>8}")
     print("=" * 92)
     print(f"  BASELINE (random single pokes) stalls shallow -- it cannot OPEN the cascade to see the")
     print(f"  deep gates. FRONTIER exploration uses verified constructors to REACH deep states and probe")

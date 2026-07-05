@@ -16,13 +16,21 @@ the two walls the real results (faithful Sachs) live behind:
             how g0 is opened; arm 2 drops it so C is noise-driven and un-reachable). Wall A: no do()- or
             bridge-based method can stand on a cause it cannot reach.
 
-Measured [2026-07-02, seeds 0-2, gates=3]:
-  Wall B: interventional holds 3/3 down to w=0.20 (observation stuck at 1/3), then 0.15->2/3, 0.10->1.3/3,
-          0.05->1/3. Lowering the threshold adds <=+0.7 gate with 0 false+ -> below w~=0.1 it is an
-          INFORMATION limit, not tuning. Acting buys ~3-4x SNR headroom over watching.
-  Wall A: C reachable -> recall 2/2; C un-reachable -> 0/2. Precision holds both arms (0 false+; the method
-          never invents a spurious X->Y). This is Sachs in miniature -- high precision, recall capped by
-          un-actuatability.
+Measured [EDGE-level scoring, seeds 0-2, gates=3; see selftest_frontier_map for exact counts]:
+  Wall B: interventional recovers the deep MULTIPLICATIVE gates that observation never does -- observation
+          recovers only the shallow LINEAR gate (~1/3 of targets) across the WHOLE sweep. Interventional
+          degrades below coupling w ~= 0.15-0.20; that floor is set by the FIXED do-magnitude (hi=+2/lo=-2),
+          i.e. a reachability / do-magnitude limit, NOT a pure noise-SNR ratio (did ~ w is LINEAR in the
+          coupling, whereas SNR ~ (w/sigma)^2). Do NOT read the acting-vs-watching gap as an "Nx SNR"
+          number -- it is not reconstructable from the table (audit pass 1, finding 7).
+  Wall A: C reachable -> both fork edges recovered; C un-reachable -> recall collapses to 0. The self-loop
+          A[C,C] is MATCHED across arms so the collapse isolates un-actuatability (finding 9). Precision is
+          scored at EDGE level (finding 2) and is NOT perfect: in the reachable arm the method emits ~0.5
+          spurious edges/run because reaching X entails reaching C, so do(a_Y) moves Y and the SOURCE is
+          misattributed (X vs C) -- precision ~0.8, not the "0 false+" the old target-only metric reported.
+          Sachs in miniature -- recall capped by un-actuatability, precision limited by source-confounding.
+          CAVEAT: no linear distractor, so false-positive counts are partly by-construction (finding 6);
+          n=3 seeds, no CI (finding 11).
 
 CLI:  python -m constructor_causal.frontier_map [--seeds 3] [--gates 3]
 """
@@ -62,8 +70,11 @@ def cascade_world(n_gates, rng, w=0.6, sigma=0.05):
 
 
 def confounder_world(rng, w=0.6, c_reachable=True):
-    """Fork C->X, C->Y (no X->Y). C is a SENSOR either way. arm1: a_C opens C linearly (reachable,
-    mirrors g0); arm2: no a_C, C noise-driven (un-reachable). True gate targets = {X, Y}."""
+    """Fork C->X, C->Y (no X->Y). C is a SENSOR either way; the self-loop A[C,C]=0.2 is MATCHED across
+    arms. arm1: a_C opens C linearly (reachable, mirrors g0). arm2: no a_C, C driven by exogenous noise
+    (un-reachable). The only differences are (i) the actuator on C and (ii) C's driver (knob vs exogenous
+    noise) -- the latter is intrinsic to what "actuatable" means, not an incidental confound. (Audit pass
+    1, finding 9: earlier arms also differed in A[C,C] 0.2->0.5, now matched.) True gate targets = {X, Y}."""
     if c_reachable:
         aC, aX, aY, C, X, Y = 0, 1, 2, 3, 4, 5
         d = 6; acts = (aC, aX, aY); names = ("a_C", "a_X", "a_Y", "C", "X", "Y")
@@ -72,8 +83,8 @@ def confounder_world(rng, w=0.6, c_reachable=True):
     else:
         aX, aY, C, X, Y = 0, 1, 2, 3, 4
         d = 5; acts = (aX, aY); names = ("a_X", "a_Y", "C", "X", "Y")
-        A = np.zeros((d, d)); A[C, C] = 0.5
-        noise = np.zeros(d); noise[C] = 1.0; noise[[X, Y]] = 0.05      # C exogenous, un-reachable
+        A = np.zeros((d, d)); A[C, C] = 0.2                          # MATCHED to reachable arm
+        noise = np.zeros(d); noise[C] = 1.0; noise[[X, Y]] = 0.05     # C exogenous (its only driver) => un-reachable
     inter = ((X, C, aX, w), (Y, C, aY, w))                            # TRUE edges: {C,a_X}->X, {C,a_Y}->Y
     return DynamicalCausalWorld(A=A, b=np.zeros(d), noise_std=noise, actuators=acts,
                                names=names, interactions=inter, rng=rng), names, inter
@@ -97,11 +108,16 @@ def build(make, seed, max_rounds, rounds=2, epochs=250, ep=120, K=3):
 
 
 def interventional_recall(ens, lib, synth, world, **kw):
-    """(true gate targets recovered, total true, false positives) via world-graded confirmation."""
+    """(true EDGES recovered, total true edges, false-positive edges) via world-graded confirmation.
+
+    Scored at EDGE granularity, not target-node: a recovered ((source, actuator), target) counts as recall
+    ONLY if {source, actuator} equals the true gate's two sources for that target; every other confirmed
+    edge is a false positive. (Target-only scoring -- the earlier version -- let a wrong-source edge count
+    as recall and made a spurious edge into a true target un-flaggable; audit pass 1, finding 2.)"""
     hyper = recover_structure_interventional(ens, lib, synth, world.sensors, world.actuators, **kw)
-    true_t = {i for (i, a, b, w) in world.interactions}
-    rec = {i for H, i, _ in hyper if len(H) == 2}
-    return len(rec & true_t), len(true_t), len(rec - true_t)
+    true_edges = {(i, frozenset((a, b))) for (i, a, b, w) in world.interactions}
+    rec_edges = {(t, frozenset(H)) for H, t, _ in hyper if len(H) == 2}
+    return len(rec_edges & true_edges), len(true_edges), len(rec_edges - true_edges)
 
 
 # --------------------------------------------------------------------------- the two sweeps

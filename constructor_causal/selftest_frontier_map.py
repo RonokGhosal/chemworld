@@ -50,7 +50,9 @@ def main():
     check("Wall B weak-coupling: recovery DEGRADES vs strong (interv@0.05 <= interv@0.4 - 1)",
           lo['interv_def'] <= hi['interv_def'] - 1.0,
           f"interv@0.05={lo['interv_def']:.1f} vs interv@0.4={hi['interv_def']:.1f}")
-    check("Wall B weak-coupling: INFORMATION limit not tuning (lowering thr adds <=1.5 gate AND 0 false+)",
+    # NOTE (audit finding 6/10): these worlds have no linear distractor, so 0 false+ at low threshold is
+    # partly by-construction -- this is consistent with an effect-size limit, not proof of a pure info limit.
+    check("Wall B weak-coupling: lowering thr adds <=1.5 edge AND 0 false+ (effect-size-limited; distractor-free)",
           (lo['interv_low'] - lo['interv_def']) <= 1.5 and lo['fp_low'] == 0.0,
           f"gain={lo['interv_low'] - lo['interv_def']:.1f} false+_low={lo['fp_low']:.1f}")
 
@@ -62,18 +64,24 @@ def main():
 
     check("Wall A: C reachable -> FULL recall (>= total - 0.5)",
           yes['recall'] >= yes['total'] - 0.5, f"recall={yes['recall']:.2f}/{yes['total']}")
-    check("Wall A: C un-reachable -> recall COLLAPSES (<= 0.5)",
+    check("Wall A: C un-reachable -> recall COLLAPSES (<= 0.5) -- the un-actuatability result",
           no['recall'] <= 0.5, f"recall={no['recall']:.2f}/{no['total']}")
-    check("Wall A: precision holds BOTH arms (0 false+ -- never invents a spurious edge)",
-          yes['fp'] == 0.0 and no['fp'] == 0.0, f"fp_reachable={yes['fp']:.2f} fp_unreachable={no['fp']:.2f}")
+    # HONEST (audit finding 2 exposed this once scored at EDGE level): precision is NOT perfect. In a fork,
+    # reaching X entails reaching C, so do(a_Y) moves Y and the method can misattribute the SOURCE (X vs C)
+    # -> ~0.5 spurious edges/run in the reachable arm. Assert precision is bounded and recall dominates fp,
+    # NOT that fp==0 (that claim was a target-only-scoring artifact).
+    check("Wall A: precision bounded + recall dominates (fp_reachable <= 1.5 AND recall > fp; un-reach fp==0)",
+          yes['fp'] <= 1.5 and yes['recall'] > yes['fp'] and no['fp'] == 0.0,
+          f"fp_reachable={yes['fp']:.2f} recall_reachable={yes['recall']:.2f} fp_unreachable={no['fp']:.2f}")
 
     print("=" * 84)
     print(f"{sum(CHECKS)}/{len(CHECKS)} checks passed")
     if FAILS:
         print(f"FAILED: {FAILS}")
         sys.exit(1)
-    print("ALL CHECKS PASSED -- acting buys SNR headroom (Wall B), floored by an information limit; "
-          "un-actuatability caps recall (Wall A); precision intact.")
+    print("ALL CHECKS PASSED (EDGE-level) -- interventional recovers deep gates observation cannot (Wall B, "
+          "floor set by fixed do-magnitude); un-actuatability caps recall (Wall A); precision ~0.8 "
+          "(source-misattribution in forks), NOT the '0 false+' the old target-only metric reported.")
 
 
 if __name__ == "__main__":

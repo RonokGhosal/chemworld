@@ -10,15 +10,27 @@ the INTERSECTION of all accepted sets. Guarantee: with prob >= 1 - alpha the ret
 the true parents (Type-I control) -- it is high-precision by construction.
 
 What it does NOT do: raise recall on faithful weak-coupling data. When the per-sample signal is below the
-noise floor, sets that omit a true parent look just as invariant as sets that include it, so the
-intersection SHRINKS -- often to {}. That empty return is the honest signal "the wall is here", not a
-wrong edge. This is the point: it buys HONESTY, not recall (measured in selftest_icp).
+noise floor, sets that omit a true parent look as invariant as sets that include it, so the intersection
+SHRINKS -- often to {}. It buys HONESTY (a subset-of-parents or {}), not recall.
+
+HONEST CAVEATS ON THE {} RETURN (audit pass 1): a {} return is NOT proof "the wall is here". It ALSO
+arises from (a) the invariance test being MISCALIBRATED -- the current test unions per-environment
+subtests against a fixed z_crit with NO Bonferroni across environments (Type-I inflates with n_env) and
+uses NORMAL critical values on small-sample t / log-variance statistics (over-rejects the true set at
+small n_per_env and, under heavy-tailed non-Gaussian residuals, rejects MORE with more data); and (b)
+BASIS MISSPECIFICATION -- a mechanism outside span([1, X_i, X_i*X_j]) (e.g. a 3-way product or a
+saturating nonlinearity) yields {} even at high SNR. So {} means "no invariant set found under THIS test
+and THIS basis", which coincides with the wall only in the calibrated Gaussian in-basis regime the
+selftest exercises (n_per_env>=200, ~4 Gaussian environments, AND-gate in basis). Proper fix (deferred):
+Bonferroni over environments + t/F reference distributions (Peters/Buhlmann/Meinshausen 2016) or a
+distribution-free residual test (Heinze-Deml/Peters 2018).
 
 Interaction basis: the design for a set S is [1, X_i (i in S), X_i*X_j (i<j in S)], so a multiplicative
 AND-gate C*a_X is representable -- without it, ICP cannot see product mechanisms at all.
 
 Numpy-only. Invariance test per environment e: residuals must have mean 0 (z on the mean) AND variance
-equal to the rest (z on the log variance ratio); reject S if any environment exceeds z_crit.
+equal to the rest (z on the log variance ratio); reject S if any environment exceeds z_crit. NOTE the
+calibration caveats above -- z_crit=3.0 is an uncorrected per-comparison threshold, not a calibrated alpha.
 """
 from __future__ import annotations
 
@@ -57,8 +69,9 @@ def icp(X, env, target, *, max_set=None, z_crit=3.0):
     never intervention/knob identity -- that is the non-circular point (checked in selftest_icp).
 
     Returns dict(parents=set, accepted=int, defined=bool): `parents` is the intersection of all accepted
-    predictor sets (a SUBSET of true parents w.h.p.); defined=False and parents=set() when NO set is
-    invariant (fail-safe -- the honest "wall is here", not a guess)."""
+    predictor sets (a subset of true parents in the CALIBRATED, in-basis regime); defined=False and
+    parents=set() when NO set passes the invariance test -- which can mean the wall OR a miscalibrated test
+    OR a mechanism outside the basis (see module docstring caveats), so do not read {} as proof alone."""
     X = np.asarray(X, float)
     n, d = X.shape
     env = np.asarray(env)

@@ -74,13 +74,14 @@ def confirm_gate(source_gate, actuator, synth, library, sensors, *, hi=2.0, lo=-
         if abs(src) < open_lo:
             return None
 
-    if rest_cache is not None and actuator in rest_cache:        # rest contrast (cache per actuator)
-        R_hi, R_lo = rest_cache[actuator]
-    else:
+    rkey = (actuator, hi, lo, h, n)                              # key by SETPOINTS, not actuator alone --
+    if rest_cache is not None and rkey in rest_cache:           # else a shared cache returns a baseline
+        R_hi, R_lo = rest_cache[rkey]                           # computed at different hi/lo/h/n (audit
+    else:                                                       # pass-2 finding 12: latent wrong-baseline)
         R_hi = synth._finals(prog_hi, n, prefix=())             # do(a=hi) from REST (source = 0)
         R_lo = synth._finals(prog_lo, n, prefix=())
         if rest_cache is not None:
-            rest_cache[actuator] = (R_hi, R_lo)
+            rest_cache[rkey] = (R_hi, R_lo)
 
     best = None
     for t in sensors:

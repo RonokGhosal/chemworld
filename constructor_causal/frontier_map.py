@@ -17,20 +17,27 @@ the two walls the real results (faithful Sachs) live behind:
             bridge-based method can stand on a cause it cannot reach.
 
 Measured [EDGE-level scoring, seeds 0-2, gates=3; see selftest_frontier_map for exact counts]:
-  Wall B: interventional recovers the deep MULTIPLICATIVE gates that observation never does -- observation
-          recovers only the shallow LINEAR gate (~1/3 of targets) across the WHOLE sweep. Interventional
-          degrades below coupling w ~= 0.15-0.20; that floor is set by the FIXED do-magnitude (hi=+2/lo=-2),
-          i.e. a reachability / do-magnitude limit, NOT a pure noise-SNR ratio (did ~ w is LINEAR in the
-          coupling, whereas SNR ~ (w/sigma)^2). Do NOT read the acting-vs-watching gap as an "Nx SNR"
-          number -- it is not reconstructable from the table (audit pass 1, finding 7).
+  Wall B: at the DEFAULT observational threshold, interventional recovers the deep multiplicative gates
+          while the observational readout gets only the shallow LINEAR gate (~1/3 of targets). CAVEAT
+          (pass-2 finding 2): this is a THRESHOLD asymmetry, not a detectability gap -- observation is
+          scored only at its default threshold while the interventional pipeline uses a low (0.05)
+          threshold; scored at the SAME low threshold, observation reportedly recovers the deep gates too
+          at much lower PRECISION (~0.38 vs ~0.8). So the honest win is ~2x PRECISION, not "observation
+          never recovers them" -- NOT yet re-measured here (add an obs_low column; deferred). The
+          interventional floor below w~=0.15-0.20 is a reachability/do-magnitude limit (the deep source
+          never opens, src_open~0.01), NOT a noise-SNR ratio -- do not read it as an "Nx SNR" number.
   Wall A: C reachable -> both fork edges recovered; C un-reachable -> recall collapses to 0. The self-loop
           A[C,C] is MATCHED across arms so the collapse isolates un-actuatability (finding 9). Precision is
           scored at EDGE level (finding 2) and is NOT perfect: in the reachable arm the method emits ~0.5
           spurious edges/run because reaching X entails reaching C, so do(a_Y) moves Y and the SOURCE is
           misattributed (X vs C) -- precision ~0.8, not the "0 false+" the old target-only metric reported.
           Sachs in miniature -- recall capped by un-actuatability, precision limited by source-confounding.
-          CAVEAT: no linear distractor, so false-positive counts are partly by-construction (finding 6);
-          n=3 seeds, no CI (finding 11).
+          CAVEAT (finding 6): no linear distractor, so false-positive counts are partly by-construction;
+          n=3 seeds, no CI (finding 11). CAVEAT (pass-2 finding 10): the un-reachable recall=0 is partly
+          STRUCTURAL -- recover_structure_interventional only proposes SOURCES from library.possible(),
+          which cannot contain an un-reachable C, so the pipeline cannot even REPRESENT an un-reachable-
+          source edge. 0/2 is consistent with the un-actuatability wall but is NOT an independent
+          measurement of it -- reframe as a design property, not evidence.
 
 CLI:  python -m constructor_causal.frontier_map [--seeds 3] [--gates 3]
 """

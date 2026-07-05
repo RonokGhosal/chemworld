@@ -36,3 +36,22 @@ Cycle plan:
 
 Literature gap: Peters/Bühlmann/Meinshausen 2016 Bonferroni-correct per-env tests + use F-test with correct df; Heinze-Deml/Peters 2018 switch to nonparametric residual tests for exactly the non-Gaussian fragility we have. Same Gaussian-likelihood fragility (Schultheiss & Bühlmann 2022) likely undercuts the neural LSNM objective — next pass.
 
+**Pass-1 fixes applied (commit 8c4ca12 + follow-up):** edge-level metric (2), retract 3-4x SNR (7), match A[C,C] (9), honest ICP {} docstring (5). **ICP calibration cluster now FIXED + tested:** Welch-t + Levene + Bonferroni over environments (findings 1/3/4/13/18); selftest_icp adds a calibration check — invariant-null reject flat 0.035/0.040 across n_env=2/32 (was 0.006→0.19). rest_cache setpoint-key bug (12) fixed.
+
+---
+
+## Pass 2 (2026-07-05) — INTENDED neural+active; ACTUALLY re-ran pass-1 modules (args-string bug in the audit script, since fixed). Became a 2nd independent adversarial audit → 19 findings, several NEW and claim-undermining.
+
+**NEW, claim-undermining (surfaced immediately):**
+- **rank 2 (frontier_map):** "acting beats watching" is a THRESHOLD asymmetry, not a recovery gap — observation at the same low (0.05) threshold reportedly recovers the deep gates too; the real win is ~2x PRECISION (~0.8 vs ~0.38). "Observation never recovers them" is unsupported. **[caveat added; obs_low re-measure deferred]**
+- **rank 10 + 16 (frontier_map):** Wall A recall=0 is TAUTOLOGICAL — recover_structure_interventional only proposes sources from library.possible(), so an un-reachable C can never be a candidate; 0/2 is a design invariant, not a measurement. Arms also differ in C's scale/noise (2.25/0.05 vs 1.0/1.0). Only the reachable-arm precision (~0.8) is genuinely measured. **[caveat added; reframed as design property]**
+- **rank 8 (sheaf_active):** "ensemble-EIG active inference (Pathak 2019)" is DECORATIVE — every gate-recovery number uses random_collect + frontier_collect (random exploration); EIG/disagreement lives only in sheaf_active.py, off the result path, and the ensemble shares init/data so disagreement can collapse. **[claim-attribution audit deferred]**
+- **rank 5 (sheaf_confirm):** selftest_sheaf_confirm scores "0 false gates" at TARGET level — the exact defect frontier_map just retracted; edge-level it's ~0.5 spurious/run. **[rescore selftest_sheaf_confirm — deferred, needs a real run]**
+
+**FIXED this pass:** ICP calibration cluster (1/3/4/13/14/18) via Welch+Levene+Bonferroni; rest_cache setpoint-key (12).
+**Deferred (logged):** rank 6 sheaf_confirm source never interventionally identified (reach opens whole chain — needs a leave-one-out do(source:=0) control); rank 7 gate_sig necessary-not-sufficient (regress t~a+source+a:source, test interaction term); rank 11 no FWER/FDR over ≤80 candidates; rank 19 envelope mapped on ONE noise family (additive homoscedastic) — the multiplicative/heteroscedastic protein regime CLAUDE.md targets is UNTESTED.
+
+**Process fix:** architecture_audit.js now parses args if delivered as a JSON string (was `typeof args === 'object'` → fell through to DEFAULT). Neural modules (neural_dag/neural_scale/neural_discovery) still UN-audited — re-queued.
+
+Pass-2 next targets: neural GPU path (RESIT order-vs-edges; LSNM Gaussian-NLL wrong-direction, Schultheiss-Bühlmann 2022); planner._finals/reach (the reachability set that makes Wall A tautological; embodied single-trajectory autocorrelation, rank 17); sheaf_active EnsembleExperimenter disagreement-collapse; cross-module "active inference / observation never recovers" attribution audit.
+

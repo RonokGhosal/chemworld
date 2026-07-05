@@ -13,30 +13,29 @@ What it does NOT do: raise recall on faithful weak-coupling data. When the per-s
 noise floor, sets that omit a true parent look as invariant as sets that include it, so the intersection
 SHRINKS -- often to {}. It buys HONESTY (a subset-of-parents or {}), not recall.
 
-HONEST CAVEATS ON THE {} RETURN (audit pass 1): a {} return is NOT proof "the wall is here". It ALSO
-arises from (a) the invariance test being MISCALIBRATED -- the current test unions per-environment
-subtests against a fixed z_crit with NO Bonferroni across environments (Type-I inflates with n_env) and
-uses NORMAL critical values on small-sample t / log-variance statistics (over-rejects the true set at
-small n_per_env and, under heavy-tailed non-Gaussian residuals, rejects MORE with more data); and (b)
-BASIS MISSPECIFICATION -- a mechanism outside span([1, X_i, X_i*X_j]) (e.g. a 3-way product or a
-saturating nonlinearity) yields {} even at high SNR. So {} means "no invariant set found under THIS test
-and THIS basis", which coincides with the wall only in the calibrated Gaussian in-basis regime the
-selftest exercises (n_per_env>=200, ~4 Gaussian environments, AND-gate in basis). Proper fix (deferred):
-Bonferroni over environments + t/F reference distributions (Peters/Buhlmann/Meinshausen 2016) or a
-distribution-free residual test (Heinze-Deml/Peters 2018).
+CALIBRATION (audit pass 1 findings 1/3/4, now FIXED): the invariance test is a two-sample WELCH t on the
+mean + a LEVENE test on the variance, per environment vs the rest, BONFERRONI-corrected over all
+comparisons (Peters/Buhlmann/Meinshausen 2016; Levene for non-Gaussian robustness, cf. Heinze-Deml 2018).
+Measured (selftest_icp): the true-set reject rate is ~alpha and FLAT in n_env (was 0.0065@2env ->
+0.1885@32env under the old uncorrected normal-threshold z-test). `alpha` is now a real significance level.
+
+REMAINING CAVEAT ON THE {} RETURN (finding 5): {} is still NOT proof "the wall is here". It also arises
+from BASIS MISSPECIFICATION -- a mechanism outside span([1, X_i, X_i*X_j]) (a 3-way product, a saturating
+nonlinearity) yields {} even at high SNR. So {} means "no invariant set found under THIS test AND THIS
+basis". And proper correction REDUCES power, so at low SNR recovery degrades to a subset or {} rather than
+a wrong edge -- honesty, not recall, is what it buys.
 
 Interaction basis: the design for a set S is [1, X_i (i in S), X_i*X_j (i<j in S)], so a multiplicative
 AND-gate C*a_X is representable -- without it, ICP cannot see product mechanisms at all.
 
-Numpy-only. Invariance test per environment e: residuals must have mean 0 (z on the mean) AND variance
-equal to the rest (z on the log variance ratio); reject S if any environment exceeds z_crit. NOTE the
-calibration caveats above -- z_crit=3.0 is an uncorrected per-comparison threshold, not a calibrated alpha.
+Uses numpy + scipy.stats (Welch t, Levene) for calibrated reference distributions.
 """
 from __future__ import annotations
 
 from itertools import combinations
 
 import numpy as np
+from scipy import stats
 
 
 def _design(X, S):
@@ -48,23 +47,30 @@ def _design(X, S):
     return np.column_stack(cols)
 
 
-def _invariant(resid, env, z_crit, min_env=5):
-    """Is the residual distribution the SAME across environments? (mean 0 and equal variance per env)."""
+def _invariant(resid, env, alpha, min_env=5):
+    """Is the residual distribution the SAME across environments? For each environment e vs the rest, a
+    two-sample WELCH t-test on the MEAN and a LEVENE test on the VARIANCE (Levene is robust to non-Gaussian
+    residuals, unlike a Gaussian log-variance z), BONFERRONI-corrected over all mean+variance comparisons.
+    Returns True if invariance is NOT rejected at level `alpha`. (Audit pass 1 findings 1/3/4: replaces the
+    uncorrected normal-threshold z-test that inflated Type-I with n_env, over-rejected at small n, and broke
+    on heavy tails.)"""
+    pvals = []
     for e in np.unique(env):
         r_e = resid[env == e]; r_rest = resid[env != e]
-        n_e, n_r = len(r_e), len(r_rest)
-        if n_e < min_env or n_r < min_env:
+        if len(r_e) < min_env or len(r_rest) < min_env:
             continue
-        s_e = max(r_e.std(ddof=1), 1e-12)
-        z_mean = abs(r_e.mean()) / max(s_e / np.sqrt(n_e), 1e-12)
-        v_e = max(r_e.var(ddof=1), 1e-12); v_r = max(r_rest.var(ddof=1), 1e-12)
-        z_var = abs(np.log(v_e / v_r)) / np.sqrt(2.0 / n_e + 2.0 / n_r)
-        if z_mean > z_crit or z_var > z_crit:
-            return False
-    return True
+        _, p_mean = stats.ttest_ind(r_e, r_rest, equal_var=False)
+        try:
+            _, p_var = stats.levene(r_e, r_rest)
+        except ValueError:
+            p_var = 1.0
+        pvals += [p_mean if np.isfinite(p_mean) else 1.0, p_var if np.isfinite(p_var) else 1.0]
+    if not pvals:
+        return True
+    return min(pvals) * len(pvals) >= alpha            # Bonferroni over all comparisons
 
 
-def icp(X, env, target, *, max_set=None, z_crit=3.0):
+def icp(X, env, target, *, max_set=None, alpha=0.05):
     """Estimate the causal parents of `target`, invariant across `env`. Consumes only data + env labels,
     never intervention/knob identity -- that is the non-circular point (checked in selftest_icp).
 
@@ -84,7 +90,7 @@ def icp(X, env, target, *, max_set=None, z_crit=3.0):
         for S in combinations(others, k):
             Phi = _design(X, S)
             beta, *_ = np.linalg.lstsq(Phi, y, rcond=None)
-            if _invariant(y - Phi @ beta, env, z_crit):
+            if _invariant(y - Phi @ beta, env, alpha):
                 accepted.append(set(S))
     if not accepted:
         return dict(parents=set(), accepted=0, defined=False)

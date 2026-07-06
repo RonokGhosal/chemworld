@@ -55,3 +55,28 @@ Literature gap: Peters/Bühlmann/Meinshausen 2016 Bonferroni-correct per-env tes
 
 Pass-2 next targets: neural GPU path (RESIT order-vs-edges; LSNM Gaussian-NLL wrong-direction, Schultheiss-Bühlmann 2022); planner._finals/reach (the reachability set that makes Wall A tautological; embodied single-trajectory autocorrelation, rank 17); sheaf_active EnsembleExperimenter disagreement-collapse; cross-module "active inference / observation never recovers" attribution audit.
 
+---
+
+## Pass 3 (2026-07-05) — planner + certify + neural. Completed 6/10 agents before SESSION LIMIT (resets 5:50pm PT); synthesize/2 verifies/lit failed. Findings salvaged from journal.
+
+**certify.py (anytime-valid inference — CONFIRMED, serious):**
+- **[HIGH] Overlapping-window martingale break (PRIMARY path).** `_reach_windows` emits a window every step (stride 1) once a hold-run reaches `horizon`, so a K-step hold yields K−horizon+1 windows sharing horizon−1 steps → breaks the test-martingale independence BettingCS relies on → intervals UNDERCOVER. `certify_library` + the live agent's recovery metric route every single-knob hold through this. **The anytime-valid certificate is invalid on its main path.**
+- [MEDIUM] Validity caveat says "exchangeability" but the real requirement is the capital-process martingale / constant-conditional-mean; single-trajectory streams satisfy neither; positive serial dependence can inflate miscoverage well past alpha with no stated bound.
+- [MEDIUM] `BettingCS.interval` fabricates a razor-thin interval when the CS is empty (martingale rejected everywhere — a dependence/misspecification signal) → spuriously confident POSSIBLE/IMPOSSIBLE verdict.
+- [LOW] model-free stationary-reach: percentile bootstrap of a nonsmooth functional undercovers; 1/m absorbing-row fill biases pi.
+
+**neural_dag.py (CONFIRMED) — docstring CORRECTED this pass:** "connected-DAG recovery" recovers only a topological ORDER (no adjacency); order_accuracy iterates over ground-truth edges only → cannot see false positives. "Break the multiplicative-noise wall classical ANM can't" is NEVER measured (baseline = random permutation only). Graded vs chance, not varsortability/sortnregress (Reisach 2021).
+
+**neural_scale.py (CONFIRMED) — docstring CORRECTED this pass:** all noise Gaussian → multiplicative regime is EXACTLY the conditionally-Gaussian LSNM best case; never tested under misspecification where Gaussian-LSNM fails. `orient_flow` uses likelihood-ratio orientation with a fixed Gaussian base — the fragile ML rule (Immer 2023). Single-direction benchmark (always x→y) can't distinguish skill from directional bias.
+
+**planner.py (HIGH):**
+- **[HIGH] verify()/reliability is near-tautological** — each effect box is mean ±4σ of the SAME skill's own output, then "reliability" = fraction of fresh trials landing in that same ±4σ box. "possible" is decided by characterize_effect's own filters, not an independent test. EVERY gate-recovery number rests on this library. **[needs an independent reliability criterion — deferred]**
+- [HIGH] Wall A recall=0 is structural (CONFIRMS pass-2 rank 10 — caveat already added).
+- [MEDIUM] confirm_gate max|DiD|-over-sensors with no multiplicity correction = winner's curse (CONFIRMS pass-2 rank 11).
+- [LOW] _finals_live dependent single-trajectory samples treated as i.i.d. by Wilson/naive-SE (anti-conservative for slow-mixing worlds).
+
+**FIXED this pass:** neural_dag + neural_scale docstring overclaims corrected.
+**Deferred (serious, need careful code + re-verification, session-limited):** certify overlapping-window fix (stride=horizon non-overlapping windows) + empty-CS interval guard; planner independent-reliability criterion; selftest_sheaf_confirm edge-rescore (finding 5).
+
+**LOOP STATUS: paused by session limit (resets 5:50pm PT).** Multi-agent audit passes cannot spawn until reset. Continuing with direct main-agent fixes meanwhile.
+

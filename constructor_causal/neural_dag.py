@@ -1,9 +1,21 @@
 """
-CONNECTED-DAG recovery by batched neural RESIT -- large-scale neural causal discovery on the A100.
+Topological-ORDER recovery by batched neural RESIT (Phase 1 only) -- large-scale neural causal discovery.
 
-neural_scale.py oriented INDEPENDENT pairs. This recovers a CONNECTED DAG (variables share parents,
-confounding is possible) by RESIT (Regression with Subsequent Independence Test, Peters et al. 2014)
-made neural + batched:
+AUDIT CAVEATS (pass 3 -- claims corrected):
+  * This recovers a topological ORDER over the variables, NOT a connected DAG: resit_order returns only a
+    permutation (no adjacency / edge-pruning). order_accuracy iterates over the GROUND-TRUTH edges only, so
+    FALSE edges are never scored -- the metric structurally cannot see false positives. Full RESIT needs a
+    Phase-2 parent-selection step that is not implemented here.
+  * "Beats classical additive-noise methods on multiplicative noise" is NOT measured: the only baseline is
+    a random permutation; no ANM estimator is ever run, so the comparative claim is unfalsifiable from this
+    code. Also graded against random chance, not the gameability baselines (varsortability / sortnregress,
+    Reisach 2021 "Beware the Simulated DAG!").
+  * All synthetic noise is Gaussian, i.e. the LSNM location-scale model is EXACTLY specified (best case);
+    the multiplicative-regime claim is not tested where Gaussian-LSNM is known to fail (misspecified noise).
+
+neural_scale.py oriented INDEPENDENT pairs. This recovers a topological ORDER over a connected DAG's
+variables (variables share parents, confounding is possible) by RESIT Phase-1 (Regression with Subsequent
+Independence Test, Peters et al. 2014) made neural + batched:
 
   while variables remain:
     for each candidate variable i, regress x_i on ALL other remaining variables with a MULTIVARIATE
@@ -13,10 +25,11 @@ made neural + batched:
   Reverse the removal order -> a topological order (causes first).
 
 The per-round candidate regressions are BATCHED (k multivariate nets in one bmm pass); the rounds are
-sequential (each depends on the previous sink). Total ~ d(d+1)/2 multivariate net fits -- O(d^2),
-genuinely GPU-bound, hopeless on CPU at large d. Score = ORDER accuracy: fraction of true edges (i->j)
-whose cause i precedes effect j in the recovered order (1.0 perfect, ~0.5 chance). Works in the
-heteroscedastic/multiplicative regime where additive methods fail, because the scale net is learned.
+sequential (each depends on the previous sink). Total ~ d(d+1)/2 multivariate net fits -- O(d^2).
+Score = ORDER accuracy: fraction of true edges (i->j) whose cause i precedes effect j in the recovered
+order (1.0 perfect, ~0.5 chance) -- an ORDER metric, not a graph-recovery (SHD/F1) metric. The scale net
+lets the location-scale regression fit heteroscedastic noise; whether that beats additive ANM is NOT
+established here (see AUDIT CAVEATS -- no ANM baseline is run).
 
 CLI: python -m constructor_causal.neural_dag [--d 40] [--n 1000] [--regime multiplicative|additive]
                                              [--indeg 2] [--h 64] [--epochs 200] [--seeds 3]

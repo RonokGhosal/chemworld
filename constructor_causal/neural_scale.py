@@ -7,8 +7,8 @@ fits; sequential CPU fits are the bottleneck, batched GPU fits are not.
 
   1. BatchedLSNM  -- T parallel location-scale nets  y = mu(x) + exp(s(x))*eps, Gaussian-NLL.
      Orient i->j if the standardized residual (y-mu)/scale is more independent of the cause (batched
-     HSIC). This is the engine from neural_discovery.py, vectorized over tasks. THE WIN: multiplicative
-     / heteroscedastic noise that additive ANM can't touch.
+     HSIC). This is the engine from neural_discovery.py, vectorized over tasks. Fits multiplicative /
+     heteroscedastic noise a fixed-variance additive ANM cannot -- but see AUDIT CAVEATS below.
 
   2. BatchedPNLFlow -- T parallel conditional normalizing flows for the POST-NONLINEAR frontier
      (y = g(f(x)+n), g invertible). Per task: an MLP f(x) and a MONOTONIC h(y) ~= g^-1
@@ -16,6 +16,19 @@ fits; sequential CPU fits are the bottleneck, batched GPU fits are not.
      change-of-variables MLE: loglik = -0.5*(h(y)-f(x))^2 + log h'(y). Orient by likelihood ratio
      (the causal direction admits the higher-likelihood flow). This is the tool a location-scale model
      could not be (neural_discovery.py left post_nonlinear at ~0.19) -- the open piece, now attacked.
+
+AUDIT CAVEATS (pass 3):
+  * All synthetic noise is Gaussian (gen_pairs draws eps ~ N(0,1)), so the multiplicative regime
+    y = scale(x)*eps is EXACTLY a conditionally-Gaussian location-scale model -- the best case the NLL
+    assumes. Gaussian-LSNM orientation fails under MISSPECIFIED (non-Gaussian) noise; that regime, and any
+    ANM baseline, are untested here. The "additive ANM can't touch" line is not measured.
+  * BatchedPNLFlow orients by LIKELIHOOD RATIO with a fixed standard-normal base -- exactly the ML rule
+    Immer et al. 2023 ("On the Identifiability and Estimation of Causal Location-Scale Noise Models" /
+    "Maximum Likelihood vs. Independence Testing") show is FRAGILE under misspecification; the LSNM engine's
+    residual-independence (HSIC) test is the more robust one. Do not read LR-orientation accuracy as a
+    general guarantee.
+  * The benchmark's ground truth is always x->y, so orientation accuracy counts agreement with a CONSTANT
+    label -- a fixed directional bias scores as well as genuine skill.
 
 Device-aware (CUDA on the A100, MPS on a Mac, else CPU). `main` runs a correctness+throughput sweep:
 orientation accuracy AND pairs/sec at growing batch sizes, so the GPU scaling is measured, not asserted.
